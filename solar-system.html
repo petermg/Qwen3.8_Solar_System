@@ -1243,7 +1243,12 @@ renderer.domElement.addEventListener("pointerup", (e) => {
   downPos = null;
   if (moved > 6) return; // was a drag
   const obj = pick(e);
-  if (!obj) return;
+  if (!obj) {
+    // Click on empty space: release the current focus so the camera is free
+    // (stays exactly where it is — no fly-back — and you can orbit/drag again).
+    if (focused) releaseFocus();
+    return;
+  }
   const isSun = obj === sunMesh;
   const target = isSun ? { mesh: sunMesh, data: SUN } : bodies.find((b) => b.mesh === obj);
   if (target) focusBody(target);
@@ -1267,6 +1272,15 @@ function focusBody(target) {
 function resetView() {
   focused = null;
   camAnim = { from: camera.position.clone(), to: HOME_POS.clone(), targetFrom: controls.target.clone(), targetTo: new THREE.Vector3(0, 0, 0), t: 0 };
+  hideInfo();
+  document.querySelectorAll("#planets button").forEach((b) => b.classList.remove("sel"));
+}
+/* Release the current focus WITHOUT moving the camera: stops the follow,
+   cancels any in-flight fly-in, hides the info panel, and clears the bar
+   highlight — leaving you exactly where you are so you can orbit/drag freely. */
+function releaseFocus() {
+  focused = null;
+  camAnim = null;
   hideInfo();
   document.querySelectorAll("#planets button").forEach((b) => b.classList.remove("sel"));
 }
