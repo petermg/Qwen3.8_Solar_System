@@ -442,12 +442,152 @@ const earthCloudsTex= loadTex("earthClouds");
 const starsTex      = loadTex("stars");
 
 /* ================= STARFIELD SKY =================
-   Full-equirectangular real star-field map (8192x4096) mapped onto a huge
-   inverted sphere with equirectangular projection, so the Milky Way band,
-   star density gradients, color spread and brightness variation are all real. */
+   Two layers:
+   1) A real DSS photographic sky (equirect, 8192x4096) rendered as a huge
+      inverted sphere — dimmed so it reads as the Milky Way band + faint haze.
+   2) An ACCURATE star catalog: the brightest ~90 naked-eye stars, each placed
+      at its true J2000 right ascension / declination, converted into the SAME
+      ecliptic coordinate frame the planets use — so every constellation sits
+      in its real position relative to the ecliptic plane. Size follows
+      apparent magnitude; color follows the B−V color index. */
+
+/* Real star catalog, J2000. Format: [name, RA_hours, Dec_deg, V_mag, B_minus_V] */
+const STAR_CATALOG = [
+  // --- Orion ---
+  ["Betelgeuse",  5.9195,   7.4071,  0.42,  0.85],
+  ["Rigel",       5.2423,  -8.2016,  0.13, -0.03],
+  ["Bellatrix",   5.4178,   6.3497,  1.64, -0.23],
+  ["Mintaka",     5.5334,  -0.2991,  2.23,  0.07],
+  ["Alnilam",     5.6042,  -1.2026,  1.69,  0.00],
+  ["Alnitak",     5.6793,  -1.9434,  1.74,  0.11],
+  ["Saiph",       5.7959,  -9.6701,  2.09,  0.00],
+  // --- Canis Major ---
+  ["Sirius",      6.7525, -16.7161, -1.46,  0.00],
+  ["Mirzam",      6.3784, -17.9567,  1.98,  0.01],
+  ["Wezen",       7.1403, -26.3936,  1.83,  0.20],
+  ["Adhara",      6.9770, -28.9726,  1.50,  0.01],
+  ["Aludra",      7.4010, -29.3034,  2.45, -0.17],
+  // --- Canis Minor ---
+  ["Procyon",     7.6552,   5.2250,  0.34,  0.42],
+  // --- Gemini ---
+  ["Castor",      7.5767,  31.8883,  1.58, -0.20],
+  ["Pollux",      7.7553,  28.0262,  1.14,  0.81],
+  ["Alhena",      6.6285,  16.3993,  1.93, -0.02],
+  // --- Taurus ---
+  ["Aldebaran",   4.5987,  16.5093,  0.86,  0.64],
+  ["Elnath",      5.4383,  28.6084,  1.68,  0.13],
+  // --- Aries ---
+  ["Hamal",       2.1160,  23.4624,  2.00,  0.85],
+  // --- Leo ---
+  ["Regulus",    10.1395,  11.9672,  1.35, -0.13],
+  ["Denebola",   11.8189,  14.5723,  2.14, -0.09],
+  ["Algieba",    10.3303,  19.8433,  2.28,  0.97],
+  // --- Virgo ---
+  ["Spica",      13.4199, -11.1613,  0.97, -0.21],
+  // --- Boötes ---
+  ["Arcturus",   14.2610,  19.1824,  0.00,  0.65],
+  // --- Scorpius ---
+  ["Antares",    16.4901, -26.4320,  0.96,  0.74],
+  ["Shaula",     17.5601, -37.1042,  1.62, -0.22],
+  ["Sargas",     17.6228, -42.9986,  2.75, -0.04],
+  ["Acrab",      16.0908, -19.8057,  2.56,  0.02],
+  ["Dschubba",   16.0053, -22.6221,  2.29,  0.03],
+  // --- Libra ---
+  ["Zubenelgenubi", 14.8639, -16.0425, 2.75, 0.62],
+  // --- Cygnus ---
+  ["Deneb",      20.6899,  45.2803,  1.25,  0.10],
+  ["Sadr",       20.3710,  40.2572,  2.23,  0.03],
+  ["Albireo",    19.5121,  27.9602,  3.05,  0.75],
+  // --- Lyra ---
+  ["Vega",       18.6156,  38.7836,  0.03, -0.21],
+  // --- Aquila ---
+  ["Altair",     19.8464,   8.8683,  0.76, -0.10],
+  // --- Pegasus (Great Square) ---
+  ["Markab",     23.0776,  15.2057,  2.49,  0.15],
+  ["Algenib",      0.2254,  15.3192,  2.84, -0.06],
+  ["Scheat",     23.0629,  28.0839,  2.42,  0.50],
+  ["Alpheratz",    0.1400,  29.0903,  2.06,  0.17],
+  // --- Cassiopeia ---
+  ["Schedar",      0.6752,  56.5370,  2.24,  0.77],
+  ["Caph",         0.1530,  59.1506,  2.27,  0.13],
+  ["Navi",         0.9453,  60.7175,  2.47, -0.06],
+  ["Ruchbah",      1.4300,  60.2356,  2.68, -0.05],
+  ["Segin",        1.9071,  63.6708,  3.38, -0.07],
+  // --- Ursa Major (Big Dipper) ---
+  ["Dubhe",      11.0621,  61.7510,  1.79,  0.07],
+  ["Merak",      11.0307,  56.3834,  2.37,  0.04],
+  ["Phecda",     11.8971,  53.6901,  2.44, -0.04],
+  ["Megrez",     12.2570,  57.0331,  3.31,  0.04],
+  ["Alioth",     12.9001,  55.9601,  1.77, -0.05],
+  ["Mizar",      13.3988,  54.9255,  2.04, -0.03],
+  ["Alkaid",     13.7923,  49.3133,  1.86, -0.08],
+  // --- Ursa Minor (Little Dipper) ---
+  ["Polaris",     2.5301,  89.2641,  1.98,  0.62],
+  ["Kochab",     14.8450,  74.1552,  2.08,  0.92],
+  ["Pherkad",    15.3457,  71.4059,  3.05,  0.54],
+  // --- Crux (Southern Cross) ---
+  ["Acrux",      12.4433, -63.0991,  0.76,  0.00],
+  ["Mimosa",     14.2574, -59.6886,  1.25,  0.50],
+  // --- Centaurus ---
+  ["Rigil",      14.6599, -60.8348,  1.25, -0.21],
+  ["Hadar",      14.0637, -60.3735,  0.61, -0.22],
+  // --- Sagittarius ---
+  ["Kaus Borealis", 18.4039,  -3.3928, 2.81, 0.27],
+  ["Kaus Media",  18.3695,  -2.7111,  2.70, 0.46],
+  ["Kaus Australis", 18.4029, -34.3966, 1.85, 0.03],
+  // --- Ophiuchus ---
+  ["Rasalhague", 17.5821,  12.5603,  2.08,  0.10],
+  // --- Hercules / Corona Borealis ---
+  ["Alphecca",   15.5782,  26.7153,  2.23,  0.00],
+  // --- Eridanus ---
+  ["Achernar",    1.6286, -57.2366,  0.46,  0.46],
+  // --- Cetus ---
+  ["Diphda",      0.7250, -17.9864,  2.03,  0.46],
+  // --- Pisces ---
+  ["Alpherg",    21.6908,  12.5766,  2.46,  0.44],
+  // --- Aquarius ---
+  ["Sadalsuud",  21.5255, -12.8485,  2.87,  0.70],
+  // --- Puppis ---
+  ["Nunki",      18.9211, -26.2967,  2.06, -0.07],
+  // --- Canopus (Carina) ---
+  ["Canopus",    6.39926, -52.6957, -0.74,  0.15],
+  // --- Capella (Auriga) ---
+  ["Capella",     5.2782,  45.9980,  0.08,  0.21],
+  // --- Fomalhaut (Piscis Austrinus) ---
+  ["Fomalhaut",  22.9608, -29.6222,  1.16,  0.06],
+];
+
+/* B−V color index -> RGB. Negative = blue-white, 0 = white,
+   0.4 = yellow, 0.8 = orange, 1.2 = red. Piecewise-linear anchors. */
+function bvToColor(bv) {
+  const A = [ // [bv, r, g, b]
+    [-0.40, 0.62, 0.72, 1.00],
+    [-0.10, 0.80, 0.88, 1.00],
+    [ 0.00, 1.00, 0.97, 1.00],
+    [ 0.40, 1.00, 0.92, 0.82],
+    [ 0.80, 1.00, 0.78, 0.55],
+    [ 1.20, 1.00, 0.62, 0.40],
+  ];
+  if (bv <= A[0][0]) return A[0].slice(1);
+  if (bv >= A[A.length-1][0]) return A[A.length-1].slice(1);
+  for (let i = 0; i < A.length-1; i++) {
+    if (bv >= A[i][0] && bv <= A[i+1][0]) {
+      const t = (bv - A[i][0]) / (A[i+1][0] - A[i][0]);
+      return [
+        A[i][1] + (A[i+1][1] - A[i][1]) * t,
+        A[i][2] + (A[i+1][2] - A[i][2]) * t,
+        A[i][3] + (A[i+1][3] - A[i][3]) * t,
+      ];
+    }
+  }
+  return [1, 1, 1];
+}
+
 {
+  // ---- Layer 1: dimmed DSS photographic sky (Milky Way band + faint haze) ----
   const skyMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide, depthWrite: false });
   skyMat.map = proceduralFallback(FALLBACKS.stars);
+  skyMat.color.set(0x555555); // dim the photo so the catalog stars read clearly
   const sky = new THREE.Mesh(new THREE.SphereGeometry(2600, 64, 48), skyMat);
   sky.material.map.mapping = THREE.EquirectangularReflectionMapping;
   scene.add(sky);
@@ -456,6 +596,82 @@ const starsTex      = loadTex("stars");
     skyMat.map = tex;
     skyMat.needsUpdate = true;
   });
+
+  // ---- Layer 2: ACCURATE catalog stars in the ecliptic frame ----
+  const R = 2500;                       // just inside the sky sphere
+  const eps = 23.4393 * Math.PI / 180;  // obliquity of the ecliptic
+  const cE = Math.cos(eps), sE = Math.sin(eps);
+
+  const pos = new Float32Array(STAR_CATALOG.length * 3);
+  const col = new Float32Array(STAR_CATALOG.length * 3);
+  const siz = new Float32Array(STAR_CATALOG.length);
+
+  for (let i = 0; i < STAR_CATALOG.length; i++) {
+    const [, raH, dec, mag, bv] = STAR_CATALOG[i];
+    const ra = raH * (Math.PI / 12);    // hours -> radians
+    const d  = dec * Math.PI / 180;
+    // equatorial unit vector (J2000)
+    const xEq = Math.cos(d) * Math.cos(ra);
+    const yEq = Math.cos(d) * Math.sin(ra);
+    const zEq = Math.sin(d);
+    // equatorial -> ecliptic (rotate about x by +obliquity)
+    const xEcl = xEq;
+    const yEcl = yEq * cE + zEq * sE;
+    const zEcl = -yEq * sE + zEq * cE;
+    // ecliptic -> scene (y = ecl_z north-up, z = -ecl_y) — same frame as planets
+    pos[i*3]   = xEcl * R;
+    pos[i*3+1] = zEcl * R;
+    pos[i*3+2] = -yEcl * R;
+
+    const [r, g, b] = bvToColor(bv);
+    // brighten with a magnitude boost so faint stars stay visible
+    const boost = Math.max(0.35, Math.pow(2.35, -mag * 0.30));
+    col[i*3]   = Math.min(1.4, r * boost);
+    col[i*3+1] = Math.min(1.4, g * boost);
+    col[i*3+2] = Math.min(1.4, b * boost);
+
+    // apparent magnitude -> point size (px, sizeAttenuation off), clamped
+    let s = 1.7 * Math.pow(10, -0.24 * mag);
+    siz[i] = Math.max(0.75, Math.min(6.5, s));
+  }
+
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  starGeo.setAttribute("color",    new THREE.BufferAttribute(col, 3));
+  starGeo.setAttribute("size",     new THREE.BufferAttribute(siz, 1));
+
+  const starMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: `
+      attribute float size;
+      attribute vec3 color;
+      varying vec3 vColor;
+      void main() {
+        vColor = color;
+        gl_PointSize = size;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d2 = dot(uv, uv);
+        float core = exp(-d2 * 28.0);
+        float halo = exp(-d2 * 7.0) * 0.55;
+        float a = core + halo;
+        if (a < 0.01) discard;
+        gl_FragColor = vec4(vColor * (core + halo * 0.7), a);
+      }
+    `,
+  });
+
+  const stars = new THREE.Points(starGeo, starMat);
+  stars.frustumCulled = false;
+  scene.add(stars);
+  window.__ssStars = stars; // debug handle
 }
 
 /* ================= THE SUN (plasma + soft corona + CMEs) ================= */
