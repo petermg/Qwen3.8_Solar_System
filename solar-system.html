@@ -95,6 +95,7 @@
   <div class="row"><label>Spacecraft</label><input type="checkbox" id="spacecraft" checked /></div>
   <div class="row"><label>Constellations</label><input type="checkbox" id="constellations" /></div>
   <div class="row"><label>Eclipse shadows</label><input type="checkbox" id="shadows" /></div>
+  <div class="row"><label>Shadow softness</label><input type="range" id="shadowSoft" min="0" max="1" step="0.01" value="0.55" /><span class="val" id="shadowSoftVal">0.55</span></div>
   <div class="row" style="flex-wrap:wrap"><label>Sim date</label><input type="date" id="simDate" style="width:130px;background:rgba(109,179,255,0.08);border:1px solid var(--line);border-radius:6px;color:#dfe8ff;font-size:11px;padding:3px 5px" /></div>
   <div class="row"><label>Sim time</label><input type="time" id="simTime" style="width:90px;background:rgba(109,179,255,0.08);border:1px solid var(--line);border-radius:6px;color:#dfe8ff;font-size:11px;padding:3px 5px" /></div>
   <div class="row" style="margin:4px 0 2px">
@@ -445,6 +446,75 @@ controls.maxDistance = 1500;
 const sunLight = new THREE.PointLight(0xffffff, 3.4, 0, 0);
 scene.add(sunLight);
 scene.add(new THREE.AmbientLight(0x33405e, 0.28));
+
+/* ================= ANALYTICAL ECLIPSE SHADOWS =================
+   The day/night terminator is smooth because it's computed ANALYTICALLY, per
+   pixel (a dot product in the shader). A shadow MAP is a sampled grid of
+   texels, so at zoom its edge magnifies into visible blocks no matter how high
+   the resolution (a PointLight cube map covering the whole scene gives the Moon
+   only ~dozens of texels). To match the terminator, we compute the eclipse
+   shadow analytically too: for each surface point we test, per pixel, whether
+   any planet/moon lies between it and the Sun, and fade a soft penumbra around
+   the umbra edge. No texture, no grid → smooth at any zoom.
+   The casters (positions + radii) are pushed to a shared uniform each frame. */
+const ECLIPSE_MAX_C = 32;
+const ECLIPSE_UNIFORMS = {
+  uCasterPos:   { value: new Array(ECLIPSE_MAX_C).fill(0).map(() => new THREE.Vector3()) },
+  uCasterRad:   { value: new Array(ECLIPSE_MAX_C).fill(0) },
+  uCasterCount: { value: 0 },
+  uSoftWidth:   { value: 1.4 },   // penumbra half-width in scene units
+};
+// Shared vertex varying + the per-pixel eclipse function. Earth's shader uses
+// its existing vW (world position) varying; Standard materials get vEclipW.
+const ECLIPSE_VARYING = "varying vec3 vEclipW;";
+const ECLIPSE_FUNC = `
+uniform vec3  uCasterPos[${ECLIPSE_MAX_C}];
+uniform float uCasterRad[${ECLIPSE_MAX_C}];
+uniform int   uCasterCount;
+uniform float uSoftWidth;
+// Returns eclipse shadow factor: 1 = fully lit, 0 = in umbra.
+float eclipseShadow(vec3 P) {
+  float f = 1.0;
+  float dSun = length(P);          // distance from the Sun (origin)
+  for (int i = 0; i < ${ECLIPSE_MAX_C}; i++) {
+    if (i >= uCasterCount) break;
+    vec3  C = uCasterPos[i];
+    float r = uCasterRad[i];
+    float dCas = length(C);        // Sun -> caster center
+    if (dCas < 1e-3) continue;
+    float d = length(C - P);       // caster center -> P
+    if (d < r * 1.5) continue;     // skip the body's own surface (self)
+    if (dSun <= dCas) continue;    // P is sunward of the caster -> no shadow
+    // caster subtends angle theta at the Sun: sin(theta) = r / dCas
+    float sinTheta = min(1.0, r / dCas);
+    float cosTheta = sqrt(max(0.0, 1.0 - sinTheta * sinTheta));
+    // angle between (Sun->P) and (Sun->caster)
+    float cosPhi = dot(normalize(P), normalize(C));
+    // angular margin in scene units at P: + = inside umbra, - = outside
+    float margin = dSun * (cosPhi - cosTheta);
+    f = min(f, 1.0 - smoothstep(-uSoftWidth, uSoftWidth, margin));
+  }
+  return f;
+}
+`;
+/* Shared onBeforeCompile hook: inject the world position (vertex) and the
+   per-pixel eclipse factor (fragment) into any MeshStandardMaterial. */
+function applyEclipseShader(mat) {
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, ECLIPSE_UNIFORMS);
+    shader.vertexShader = ECLIPSE_VARYING + "\n" + shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      "#include <begin_vertex>\n vEclipW = (modelMatrix * vec4(position, 1.0)).xyz;"
+    );
+    shader.fragmentShader = ECLIPSE_VARYING + "\n" + ECLIPSE_FUNC + shader.fragmentShader.replace(
+      "#include <lights_fragment_begin>",
+      "#include <lights_fragment_begin>\n" +
+      "  float ecf = eclipseShadow(vEclipW);\n" +
+      "  reflectedLight.directDiffuse  *= ecf;\n" +
+      "  reflectedLight.directSpecular *= ecf;"
+    );
+  };
+}
 
 /* ================= TEXTURE LOADING (with progress + procedural fallbacks) ================= */
 const loader = new THREE.TextureLoader();
@@ -961,6 +1031,7 @@ function makePlanet(d) {
   const geo = new THREE.SphereGeometry(d.r, 48, 36);
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0 });
   mat.map = proceduralFallback(FALLBACKS[d.tex]);
+  applyEclipseShader(mat);   // per-pixel analytical eclipse shadows (smooth)
   const mesh = new THREE.Mesh(geo, mat);
   mesh.userData.body = d;
   holder.add(mesh);
@@ -1031,6 +1102,7 @@ const EARTH_FRAG = `
 uniform sampler2D dayMap; uniform sampler2D nightMap; uniform sampler2D specMap;
 uniform float uTime;
 varying vec2 vUv; varying vec3 vN; varying vec3 vW;
+${ECLIPSE_FUNC}
 void main() {
   vec3 N = normalize(vN);
   vec3 V = normalize(cameraPosition - vW);
@@ -1040,6 +1112,7 @@ void main() {
   float nd = dot(N, L);
   float dayF = smoothstep(-0.10, 0.22, nd);
   vec3 dayLight = day * (0.22 + 1.2 * max(nd, 0.0));
+  dayLight *= eclipseShadow(vW);   // per-pixel analytical eclipse (lunar/solar)
   vec3 col = mix(night * 1.35, dayLight, dayF);
   // ocean specular sun-glint
   float spec = pow(max(dot(N, normalize(L + V)), 0.0), 60.0) * (1.0 - texture2D(specMap, vUv).r) * dayF;
@@ -1086,7 +1159,14 @@ function makeEarth() {
   const uSpec = { value: null };
   const uTime = { value: 0 };
   const mat = new THREE.ShaderMaterial({
-    uniforms: { dayMap: uDay, nightMap: uNight, specMap: uSpec, uTime },
+    uniforms: {
+      dayMap: uDay, nightMap: uNight, specMap: uSpec, uTime,
+      // Shared analytical-eclipse uniforms (same value objects, kept in sync)
+      uCasterPos: ECLIPSE_UNIFORMS.uCasterPos,
+      uCasterRad: ECLIPSE_UNIFORMS.uCasterRad,
+      uCasterCount: ECLIPSE_UNIFORMS.uCasterCount,
+      uSoftWidth: ECLIPSE_UNIFORMS.uSoftWidth,
+    },
     vertexShader: EARTH_VERT, fragmentShader: EARTH_FRAG,
   });
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(d.r, 64, 48), mat);
@@ -1101,6 +1181,7 @@ function makeEarth() {
 
   // independent cloud layer
   const cMat = new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.5, roughness: 1, metalness: 0, depthWrite: false });
+  applyEclipseShader(cMat);   // clouds also fall into eclipse shadows
   cMat.map = proceduralFallback(FALLBACKS.earth).clone();
   cMat.map.color = new THREE.Color(1, 1, 1);
   const clouds = new THREE.Mesh(new THREE.SphereGeometry(d.r * 1.02, 48, 36), cMat);
@@ -1163,9 +1244,11 @@ function makeMoon(parentBody, moonKey) {
   const md = MOONS[moonKey];
   const mGroup = new THREE.Group();
   parentBody.holder.add(mGroup);
-  mGroup.rotation.y = Math.random() * Math.PI * 2; // random starting phase
+  // No random initial phase: the Moon's position is computed analytically each
+  // frame in updatePositions (calibrated to the true lunar mean longitude).
 
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.98, metalness: 0 });
+  applyEclipseShader(mat);   // per-pixel analytical eclipse shadows (smooth)
   // Texture: embedded base64 (most moons) → CDN (charon, triton) → Earth Moon map.
   const b64 = MOON_TEX_B64[moonKey];
   if (b64) {
@@ -1195,7 +1278,10 @@ function makeMoon(parentBody, moonKey) {
     geo = new THREE.SphereGeometry(md.r, 32, 24);
   }
   const mMesh = new THREE.Mesh(geo, mat);
-  mMesh.position.x = md.dist;
+  // The Moon's group is positioned analytically each frame (3D orbit), so the
+  // mesh sits at the group's origin. Other moons orbit via group rotation, so
+  // their mesh is offset by md.dist along the group's X axis.
+  mMesh.position.x = (moonKey === "moon") ? 0 : md.dist;
   mMesh.userData.body = md;
   mMesh.userData.moonKey = moonKey;
   mGroup.add(mMesh);
@@ -1434,30 +1520,54 @@ function updateSpacecraft(T) {
   }
 }
 
-/* ================= ECLIPSE SHADOWS =================
-   Enables Three.js shadow mapping so the Sun (point light) casts shadows
-   onto planets and moons. Visible effects: lunar eclipses (Earth's shadow
-   on the Moon), solar eclipses (Moon's shadow on Earth), Io transits on
-   Jupiter, etc. The shadow camera covers ~300 scene units (inner system). */
+/* ================= ECLIPSE SHADOWS (analytical) =================
+   Per-pixel, analytical eclipse shadows (NOT a shadow map). The casters are
+   the planets + moons; each frame we push their world positions + visual
+   radii into ECLIPSE_UNIFORMS, and every surface fragment tests whether any
+   caster lies between it and the Sun, fading a soft penumbra around the umbra
+   edge. Because it's computed in the shader per pixel (like the day/night
+   terminator), the eclipse edge is smooth at any zoom — no texel grid.
+   Visible effects: lunar eclipses (Earth's shadow on the Moon), solar
+   eclipses (Moon's shadow on Earth), Io transits on Jupiter, etc. */
+let eclipseEnabled = false;
 function setupShadows(enabled) {
-  renderer.shadowMap.enabled = enabled;
-  sunLight.castShadow = enabled;
-  if (enabled) {
-    sunLight.shadow.mapSize.set(1024, 1024);
-    sunLight.shadow.camera.near = 1;
-    sunLight.shadow.camera.far = 300;
-    sunLight.shadow.bias = -0.002;
-  }
-  bodies.forEach(b => {
-    b.mesh.castShadow = enabled;
-    b.mesh.receiveShadow = enabled;
-    b.mesh.material.needsUpdate = true;
-  });
-  allMoons.forEach(m => {
-    m.mesh.castShadow = enabled;
-    m.mesh.receiveShadow = enabled;
-    m.mesh.material.needsUpdate = true;
-  });
+  eclipseEnabled = enabled;
+  ECLIPSE_UNIFORMS.uCasterCount.value = enabled ? ECLIPSE_MAX_C : 0;
+  if (enabled) updateEclipseCasters();   // prime the uniforms immediately
+}
+
+/* Push every planet + moon world position and visual radius into the shared
+   caster uniforms. Visual radius = base radius × current mesh scale (so it
+   tracks the Planet-size slider and Realistic-scale toggle). */
+const _ePos = new THREE.Vector3();
+function updateEclipseCasters() {
+  if (!eclipseEnabled) return;
+  const pos = ECLIPSE_UNIFORMS.uCasterPos.value;
+  const rad = ECLIPSE_UNIFORMS.uCasterRad.value;
+  let n = 0;
+  const push = (mesh, baseR) => {
+    if (n >= ECLIPSE_MAX_C) return;
+    mesh.getWorldPosition(_ePos);
+    const s = mesh.scale.x;
+    pos[n].set(_ePos.x, _ePos.y, _ePos.z);
+    rad[n] = baseR * s;
+    n++;
+  };
+  for (const b of bodies) push(b.mesh, b.data.r);
+  for (const m of allMoons) push(m.mesh, m.data.r);
+  // Pad the rest (radius 0 → no effect) so stale entries don't shadow.
+  while (n < ECLIPSE_MAX_C) rad[n++] = 0;
+}
+
+/* Shadow softness slider: 0 = tight penumbra (crisper umbra edge), 1 = very
+   wide penumbra (gradual fade). Sets uSoftWidth — the penumbra half-width in
+   scene units over which the analytical eclipse shadow fades. Because the
+   shadow is computed per pixel (not from a texture grid), this fades smoothly
+   with no blockiness, matching the day/night terminator's character. */
+function setShadowSoftness(s) {
+  ECLIPSE_UNIFORMS.uSoftWidth.value = 0.1 + s * 1.6;
+  const el = document.getElementById("shadowSoftVal");
+  if (el) el.textContent = s.toFixed(2);
 }
 
 /* ================= SPEED PRESETS ================= */
@@ -1528,6 +1638,9 @@ document.getElementById("ssCopy").onclick = copyScreenshot;
   t("spacecraft",     v => { spacecraft.group.visible = v; });
   t("constellations", v => { constellationGroup.visible = v; });
   t("shadows",        v => { setupShadows(v); });
+  const softEl = document.getElementById("shadowSoft");
+  softEl.addEventListener("input", () => setShadowSoftness(parseFloat(softEl.value)));
+  setShadowSoftness(parseFloat(softEl.value));
 })();
 
 /* ================= STATE ================= */
@@ -1631,7 +1744,40 @@ function updatePositions(T, now) {
     // Rotate all moons of this planet (each with its own orbital period).
     // m.dir is -1 for retrograde moons (e.g. Triton), so they orbit backwards.
     for (const m of (b.moons || [])) {
-      m.group.rotation.y = m.dir * (T / m.data.period) * Math.PI * 2;
+      if (m.moonKey === "moon") {
+        // The Moon: full 3D orbit with 5.145° inclination + 18.6-yr node
+        // regression, calibrated to the true mean longitude. This is what
+        // makes lunar/solar eclipses occur only during the correct seasons.
+        const Tc = T / 36525;
+        // Mean longitude (deg): λ = 218.316 + 481267.881·Tc  (Meeus, Astr. Algorithms)
+        const lambda = 218.316 + 481267.881 * Tc;
+        // Ascending-node longitude (deg): Ω = 125.0445 − 1934.13626·Tc
+        const Om = 125.0445 - 1934.13626 * Tc;
+        // Angle from the node, in the Moon's orbital plane
+        const th = THREE.MathUtils.degToRad(lambda - Om);
+        const inc = THREE.MathUtils.degToRad(5.145);
+        const cO = Math.cos(THREE.MathUtils.degToRad(Om));
+        const sO = Math.sin(THREE.MathUtils.degToRad(Om));
+        // Ecliptic-plane position relative to Earth.
+        const ex = m.data.dist * (cO * Math.cos(th) - sO * Math.sin(th) * Math.sin(inc));
+        const ey = m.data.dist * (sO * Math.cos(th) + cO * Math.sin(th) * Math.sin(inc));
+        const ez = m.data.dist * Math.sin(th) * Math.cos(inc);
+        // Ecliptic (x,y,z) → scene (x, y_up, z): scene = (ex, ez, -ey)
+        const sceneX = ex, sceneY = ez, sceneZ = -ey;
+        // The Moon group is a child of the planet's holder, which is rotated
+        // about the scene Z axis by the planet's axial tilt. De-tilt the scene
+        // coords back into the holder's local frame: (lx,ly) = Rz(-tilt)·(sx,sy).
+        const tilt = THREE.MathUtils.degToRad(b.data.tilt);
+        const ct = Math.cos(tilt), st = Math.sin(tilt);
+        m.group.position.set(
+          ct * sceneX + st * sceneY,
+          -st * sceneX + ct * sceneY,
+          sceneZ
+        );
+        m.group.rotation.y = 0;
+      } else {
+        m.group.rotation.y = m.dir * (T / m.data.period) * Math.PI * 2;
+      }
     }
   }
   earthBody.mesh.material.uniforms.uTime.value = now * 0.6 + T * 0.02;
@@ -1669,6 +1815,7 @@ setInterval(() => {
   const T = (simMs - J2000_MS) / 86400000;
   const now = performance.now() * 0.001;
   updatePositions(T, now);
+  updateEclipseCasters();
   updateCosmos(T, now, 0.06);
   updateBelts(T);
   updateComet(T);
@@ -1700,6 +1847,7 @@ function animate() {
   // Days since J2000 epoch
   const T = (simMs - J2000_MS) / 86400000;
   updatePositions(T, now);
+  updateEclipseCasters();
 
   updateCosmos(T, now, dt);
 
@@ -1981,7 +2129,11 @@ function inputsToMs() {
   if (!dv) return null;
   const [y, mo, da] = dv.split("-").map(Number);
   const [hh, mm] = (tv || "00:00").split(":").map(Number);
-  return Date.UTC(y, mo - 1, da, hh, mm);
+  // Use LOCAL time to match what msToInputs() displays (d.getHours(), etc.).
+  // The old Date.UTC() interpreted the fields as UTC, causing an 8-hour (or
+  // other TZ offset) round-trip shift: type "03:33 PST" → read as 03:33 UTC
+  // → displayed back as 19:33 the previous day.
+  return new Date(y, mo - 1, da, hh, mm, 0, 0).getTime();
 }
 function setSimDate(ms) {
   if (ms == null || isNaN(ms)) return;
