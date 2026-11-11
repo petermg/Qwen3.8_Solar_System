@@ -49,6 +49,13 @@
   #info .x { position: absolute; top: 8px; right: 10px; cursor: pointer; color: #8fa3cc; font-size: 14px; }
   #info .quiz { margin-top: 10px; }
 
+  .presets { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+  .presets button { font-size: 10px; padding: 3px 7px; border-radius: 5px; }
+  .presets button.sel { background: rgba(109,179,255,0.42); border-color: var(--accent); }
+  #screenshotBar { bottom: 14px; right: 14px; padding: 8px 10px; display: flex; gap: 6px; align-items: center; }
+  #screenshotBar button { font-size: 11px; padding: 5px 10px; }
+  #ssFlash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 30; transition: opacity .12s; }
+  #spacecraftTag { position: fixed; pointer-events: none; font-size: 10px; color: #7fd4ff; text-shadow: 0 0 6px #000; z-index: 4; white-space: nowrap; display: none; }
   #tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; font-size: 11.5px; z-index: 8; display: none; white-space: nowrap; }
 
   #loading { position: fixed; inset: 0; background: #000; display: flex; flex-direction: column; gap: 18px; align-items: center; justify-content: center; z-index: 10; transition: opacity .7s; }
@@ -75,12 +82,19 @@
   <h2>Controls</h2>
   <div class="row"><label>Time speed</label><input type="range" id="speed" min="0" max="100" step="1" value="0" /><span class="val" id="speedVal">1x</span></div>
   <div class="row" style="margin-top:1px"><label style="color:#8fa3cc;font-size:11px" id="speedHint">1x = real time</label></div>
+  <div class="presets" id="speedPresets"></div>
   <div class="row"><label>Exact speed</label><input type="number" id="speedNum" min="0" max="10000000000" step="any" value="1" /><span class="val">×</span></div>
   <div class="row"><label>Planet size</label><input type="range" id="size" min="0.5" max="2.5" step="0.1" value="1" /><span class="val" id="sizeVal">1.0x</span></div>
   <div class="row"><label>Realistic scale</label><input type="checkbox" id="realScale" /></div>
   <div class="row"><label>Orbit rings</label><input type="checkbox" id="orbits" checked /></div>
   <div class="row"><label>Labels</label><input type="checkbox" id="labels" checked /></div>
   <div class="row"><label>True colors</label><input type="checkbox" id="trueColor" checked /></div>
+  <div class="row"><label>Asteroid belt</label><input type="checkbox" id="asteroidBelt" checked /></div>
+  <div class="row"><label>Kuiper belt</label><input type="checkbox" id="kuiperBelt" checked /></div>
+  <div class="row"><label>Comet</label><input type="checkbox" id="comet" checked /></div>
+  <div class="row"><label>Spacecraft</label><input type="checkbox" id="spacecraft" checked /></div>
+  <div class="row"><label>Constellations</label><input type="checkbox" id="constellations" /></div>
+  <div class="row"><label>Eclipse shadows</label><input type="checkbox" id="shadows" /></div>
   <div class="row" style="flex-wrap:wrap"><label>Sim date</label><input type="date" id="simDate" style="width:130px;background:rgba(109,179,255,0.08);border:1px solid var(--line);border-radius:6px;color:#dfe8ff;font-size:11px;padding:3px 5px" /></div>
   <div class="row"><label>Sim time</label><input type="time" id="simTime" style="width:90px;background:rgba(109,179,255,0.08);border:1px solid var(--line);border-radius:6px;color:#dfe8ff;font-size:11px;padding:3px 5px" /></div>
   <div class="row" style="margin:4px 0 2px">
@@ -97,6 +111,11 @@
 
 <div class="panel" id="planets"></div>
 
+<div class="panel" id="screenshotBar">
+  <button id="ssCapture" title="Capture a high-res screenshot (P)">📷 Photo</button>
+  <button id="ssCopy" title="Copy image to clipboard">Copy</button>
+</div>
+
 <div class="panel" id="info">
   <span class="x" id="infoX">✕</span>
   <h3 id="infoName"></h3>
@@ -105,6 +124,8 @@
   <div class="quiz" id="infoQuiz"></div>
 </div>
 
+<div id="ssFlash"></div>
+<div id="spacecraftTag"></div>
 <div id="tip"></div>
 
 <div id="loading">
@@ -153,6 +174,9 @@ const TEXTURES = {
   uranus:      GEM + "bodies/uranus_2k.webp",
   neptune:     GEM + "bodies/neptune_2k.webp",
   pluto:       "https://raw.githubusercontent.com/CelestiaProject/CelestiaContent/master/textures/hires/pluto.jpg",
+  charon:      "https://raw.githubusercontent.com/CelestiaProject/CelestiaContent/master/textures/hires/charon.jpg",
+  triton:      "https://raw.githubusercontent.com/CelestiaProject/CelestiaContent/master/textures/hires/triton.jpg",
+  uranusRing:  "https://raw.githubusercontent.com/CelestiaProject/CelestiaContent/master/textures/hires/uranus-rings.png",
 };
 const TOTAL_TEXTURES = Object.keys(TEXTURES).length;
 
@@ -313,11 +337,13 @@ const DATA = [
     real:{ r:69911, a:5.203 },
     facts:[["Diameter","139,820 km"],["Day length","9.9 hours"],["Year","11.86 Earth years"],["Moons","95 known"],["Gravity","24.79 m/s²"],["Mean temp","−108 °C"]],
     desc:"The giant of the solar system — more massive than all other planets combined. Its Great Red Spot is a storm larger than Earth that has raged for at least 300 years. It is a gas giant with no solid surface." },
-  { key:"saturn", name:"Saturn", tex:"saturn", r:2.7, dist:55, tilt:26.7, day:0.444, ring:true,
+  { key:"saturn", name:"Saturn", tex:"saturn", r:2.7, dist:55, tilt:26.7, day:0.444,
+     ring: { tex:"saturnRing", inner:1.3, outer:2.45, format:"disk", texIn:0.279, texOut:0.487 },
     real:{ r:58232, a:9.537 },
     facts:[["Diameter","116,460 km"],["Day length","10.7 hours"],["Year","29.4 Earth years"],["Moons","146 known"],["Gravity","10.44 m/s²"],["Mean temp","−139 °C"]],
     desc:"Famous for its dazzling ring system of ice and rock. Saturn is so light it would float in water — its average density is below that of water. Its largest moon, Titan, has rivers and lakes of liquid methane." },
   { key:"uranus", name:"Uranus", tex:"uranus", r:1.9, dist:67, tilt:97.8, day:0.718,
+     ring: { tex:"uranusRing", inner:1.55, outer:2.1, format:"strip" },
     real:{ r:25362, a:19.19 },
     facts:[["Diameter","50,724 km"],["Day length","17.2 hours"],["Year","84 Earth years"],["Moons","28 known"],["Gravity","8.69 m/s²"],["Mean temp","−197 °C"]],
     desc:"An ice giant tipped on its side at 98° — it rolls around the Sun, likely after an ancient collision. Methane in its atmosphere gives it a pale cyan color. Each pole gets 42 years of daylight, then 42 years of darkness." },
@@ -354,10 +380,10 @@ const MOONS = {
   callisto: { name:"Callisto", parent:"jupiter", r:0.42, dist:10.5, period:16.689, real:{ r:2410.3 },
     facts:[["Diameter","4,821 km"],["Orbital period","16.69 days"],["Distance from Jupiter","1,882,709 km"],["Moons of","Jupiter (IV)"]],
     desc:"The most heavily scarred world in the solar system — a surface so ancient and cratered that it records 4 billion years of impacts." },
-   phobos: { name:"Phobos", parent:"mars", r:0.12, dist:1.9,   period:0.3189, real:{ r:11 },
+   phobos: { name:"Phobos", parent:"mars", r:0.12, dist:1.9,   period:0.3189, real:{ r:11 }, irregular:{ amp:0.30, freq:3.2, seed:11 },
      facts:[["Diameter","22.5 km"],["Orbital period","7.66 hours"],["Distance from Mars","9,376 km"],["Moons of","Mars (I)"]],
      desc:"Mars's inner moon. It orbits so fast (7.66 h) that it rises twice a day on Mars and is slowly spiraling inward — doomed to break apart and crash into the planet in ~50 million years." },
-   deimos: { name:"Deimos", parent:"mars", r:0.10, dist:3.4,   period:1.2624, real:{ r:6 },
+   deimos: { name:"Deimos", parent:"mars", r:0.10, dist:3.4,   period:1.2624, real:{ r:6 }, irregular:{ amp:0.22, freq:2.6, seed:23 },
      facts:[["Diameter","15 km"],["Orbital period","30.4 hours"],["Distance from Mars","23,459 km"],["Moons of","Mars (II)"]],
      desc:"Mars's small, potato-shaped outer moon. Unlike Phobos it is drifting slowly outward — the opposite spiral. A chunk of debris, likely a captured asteroid." },
    mimas: { name:"Mimas", parent:"saturn", r:0.18, dist:7.5,   period:0.942,  real:{ r:198.2 },
@@ -378,6 +404,12 @@ const MOONS = {
    iapetus:{ name:"Iapetus", parent:"saturn", r:0.40, dist:24.0, period:79.32, real:{ r:734.5 },
      facts:[["Diameter","1,471 km"],["Orbital period","79.3 days"],["Distance from Saturn","3,560,820 km"],["Moons of","Saturn (VIII)"]],
      desc:"A two-tone moon: one hemisphere is bright ice, the other is dark — the sharpest color contrast in the solar system — crowned by a towering equatorial ridge." },
+  charon: { name:"Charon", parent:"pluto", r:0.135, dist:0.75, period:6.387, real:{ r:606 }, texKey:"charon",
+    facts:[["Diameter","1,212 km"],["Orbital period","6.39 days"],["Distance from Pluto","19,590 km"],["Moons of","Pluto (I)"]],
+    desc:"Pluto's giant moon — so large (half Pluto's size) that the pair orbit a point *outside* Pluto, making them a true 'double dwarf planet.' Tidal-locked, each always shows the same face to the other. New Horizons revealed its dark-polar 'Mordor Macula'." },
+  triton: { name:"Triton", parent:"neptune", r:0.14, dist:3.0, period:5.877, retro:true, real:{ r:1353.4 }, texKey:"triton",
+    facts:[["Diameter","2,707 km"],["Orbital period","5.88 days (retrograde)"],["Distance from Neptune","354,800 km"],["Moons of","Neptune (I)"]],
+    desc:"Neptune's largest moon, and the only big moon in the solar system that orbits *backwards* (retrograde) — a tell-tale sign it was a captured Kuiper Belt object. It has active geysers of nitrogen and is slowly spiraling in toward Neptune." },
 };
 // Back-compat alias
 const MOON = MOONS.moon;
@@ -505,6 +537,9 @@ const FALLBACKS = {
   uranus: ["#3f9ea6", "#6fcdd4", "#c8f0f2"],
   neptune:["#17356e", "#2a55a5", "#4a7fd4"],
   pluto:  ["#8a7560", "#c8b098", "#efe0cc"],   // tan ice w/ bright heart
+  charon: ["#4a4440", "#6e6862", "#9a948c"],   // gray-brown, dark polar spot
+  triton: ["#9a8a78", "#c8b8a0", "#efe6d8"],   // nitrogen ice, pale tan
+  uranusRing: ["#2a5a5e", "#3f8a8e", "#6fc8cc"],
   stars:  ["#000010", "#000008", "#000006"],
 };
 const FALLBACK_KEY = { earthDay:"earth", earthNight:"earth", earthSpec:"earth", earthNormal:"earth", earthClouds:"earth" };
@@ -938,25 +973,29 @@ function makePlanet(d) {
   const body = { mesh, orbitGroup, holder, data: d, worldPos: new THREE.Vector3(), ringMesh: null, cloudMesh: null, orbitLine: line, moons: [] };
   bodies.push(body);
 
-  // Saturn ring — the GEM texture is a top-DOWN disk: content (rings) occupies
-  // radius 0.559..0.973 of the image; center + far edge are transparent.
-  // We align the geometry's radial span exactly onto that content band so the
-  // visible rings fill the mesh and the alpha gaps (Cassini division) show.
+  // Planetary rings — data-driven. Two texture layouts are supported:
+  //   "disk"  (Saturn): a top-DOWN disk; the ring content occupies a radial
+  //           band [texIn..texOut] of the image. We map the geometry's radial
+  //           span exactly onto that band so the real rings + Cassini gap show.
+  //   "strip" (Uranus): a 1-pixel-tall radial alpha profile (x = radius). We
+  //           set UV.x = radial fraction, UV.y = 0.5, sampling the profile.
   if (d.ring) {
-    // Texture (1024x1024) content measured at radius 286..498 px from center.
-    // In UV space (0..1 over full width) that's 0.279..0.487, centered at 0.5.
-    const TEX_IN = 0.279, TEX_OUT = 0.487;
-    const inner = d.r * 1.3, outer = d.r * 2.45;
+    const cfg = d.ring;
+    const inner = d.r * cfg.inner, outer = d.r * cfg.outer;
     const ringGeo = new THREE.RingGeometry(inner, outer, 128, 1);
     const pos = ringGeo.attributes.position;
     const uv = ringGeo.attributes.uv;
     for (let i = 0; i < pos.count; i++) {
       const rGeo = Math.hypot(pos.getX(i), pos.getY(i));
       const t = (rGeo - inner) / (outer - inner);        // 0..1 across the ring
-      const rTex = TEX_IN + t * (TEX_OUT - TEX_IN);      // map onto the content band
-      const dirX = rGeo > 0 ? pos.getX(i) / rGeo : 0;
-      const dirY = rGeo > 0 ? pos.getY(i) / rGeo : 0;
-      uv.setXY(i, 0.5 + dirX * rTex, 0.5 + dirY * rTex);
+      if (cfg.format === "strip") {
+        uv.setXY(i, t, 0.5);                             // radial profile → x
+      } else {
+        const rTex = cfg.texIn + t * (cfg.texOut - cfg.texIn);  // onto content band
+        const dirX = rGeo > 0 ? pos.getX(i) / rGeo : 0;
+        const dirY = rGeo > 0 ? pos.getY(i) / rGeo : 0;
+        uv.setXY(i, 0.5 + dirX * rTex, 0.5 + dirY * rTex);
+      }
     }
     // Unlit (Basic) so the rings are always bright: the Sun sits in the ring
     // plane (y=0), so a lit Standard material would be lit at a grazing angle
@@ -971,7 +1010,7 @@ function makePlanet(d) {
     ring.renderOrder = 2;
     holder.add(ring);
     body.ringMesh = ring;
-    loadTex("saturnRing").then((tex) => { ringMat.map = tex; ringMat.needsUpdate = true; });
+    loadTex(cfg.tex).then((tex) => { ringMat.map = tex; ringMat.needsUpdate = true; });
   }
   return body;
 }
@@ -1077,6 +1116,49 @@ function makeEarth() {
    parentBody: the body object whose holder the moon group attaches to.
    moonKey:    key into MOONS.
    Returns the moon body object { mesh, data, parent, ... }. */
+/* Small deterministic value-noise (seeded) so irregular-moon bumpy shapes are
+   stable across reloads. Returns 0..1. Used to displace a sphere into a lumpy
+   "potato" — real small moons (Phobos, Deimos) are far too low-mass to be round. */
+function hashNoise(x, y, z, seed) {
+  let n = Math.sin(x * 127.1 + y * 311.7 + z * 74.7 + seed * 53.13) * 43758.5453;
+  return n - Math.floor(n);
+}
+function vnoise(x, y, z, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+  const c = (dx, dy, dz) => hashNoise(xi + dx, yi + dy, zi + dz, seed);
+  const l = (a, b, t) => a + (b - a) * t;
+  return l(
+    l(l(c(0,0,0), c(1,0,0), u), l(c(0,1,0), c(1,1,0), u), v),
+    l(l(c(0,0,1), c(1,0,1), u), l(c(0,1,1), c(1,1,1), u), v),
+    w);
+}
+/* A lumpy, asymmetric "potato" sphere. `amp` = max radial displacement fraction
+   (e.g. 0.28), `freq` = noise frequency (higher = finer bumps). */
+function makeIrregularGeometry(radius, detail, amp, freq, seed) {
+  const geo = new THREE.SphereGeometry(radius, detail, Math.round(detail * 0.8));
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).normalize();
+    // Two octaves: broad lobes + finer bumps, for an organic asymmetric lumpy look
+    const n = vnoise(v.x * freq, v.y * freq, v.z * freq, seed)
+            + 0.5 * vnoise(v.x * freq * 2.3, v.y * freq * 2.3, v.z * freq * 2.3, seed + 7.3);
+    const disp = 1 + (n - 0.75) * 2 * amp;   // ~ (1-amp .. 1+amp), centered near 1
+    v.multiplyScalar(radius * disp);          // unit vector × radius → true displaced radius
+    pos.setXYZ(i, v.x, v.y, v.z);
+    // Equirectangular UV from the displaced direction (matches SphereGeometry's
+    // texture wrapping), so the real moon map stays correctly mapped on the bumps.
+    const dir = v.clone().normalize();
+    const u = 0.5 + Math.atan2(dir.z, dir.x) / (2 * Math.PI);
+    const vv = 0.5 + Math.asin(Math.max(-1, Math.min(1, dir.y))) / Math.PI;
+    geo.attributes.uv.setXY(i, u, vv);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function makeMoon(parentBody, moonKey) {
   const md = MOONS[moonKey];
   const mGroup = new THREE.Group();
@@ -1084,7 +1166,7 @@ function makeMoon(parentBody, moonKey) {
   mGroup.rotation.y = Math.random() * Math.PI * 2; // random starting phase
 
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.98, metalness: 0 });
-  // Use embedded base64 texture if available, else CDN
+  // Texture: embedded base64 (most moons) → CDN (charon, triton) → Earth Moon map.
   const b64 = MOON_TEX_B64[moonKey];
   if (b64) {
     mat.map = proceduralFallback(FALLBACKS[moonKey] || FALLBACKS.moon);
@@ -1097,18 +1179,30 @@ function makeMoon(parentBody, moonKey) {
       mat.needsUpdate = true;
     };
     img.src = b64;
+  } else if (md.texKey && TEXTURES[md.texKey]) {
+    mat.map = proceduralFallback(FALLBACKS[md.texKey] || FALLBACKS[moonKey] || FALLBACKS.moon);
+    loadTex(md.texKey).then((t) => { mat.map = t; mat.needsUpdate = true; });
   } else {
     mat.map = proceduralFallback(FALLBACKS.moon);
     loadTex("moon").then((t) => { mat.map = t; mat.needsUpdate = true; });
   }
-  const mMesh = new THREE.Mesh(new THREE.SphereGeometry(md.r, 32, 24), mat);
+  // Geometry: small low-mass moons are lumpy "potatoes," not spheres.
+  // md.irregular = { amp, freq, seed }; otherwise a plain sphere.
+  let geo;
+  if (md.irregular) {
+    geo = makeIrregularGeometry(md.r, 40, md.irregular.amp, md.irregular.freq, md.irregular.seed);
+  } else {
+    geo = new THREE.SphereGeometry(md.r, 32, 24);
+  }
+  const mMesh = new THREE.Mesh(geo, mat);
   mMesh.position.x = md.dist;
   mMesh.userData.body = md;
   mMesh.userData.moonKey = moonKey;
   mGroup.add(mMesh);
   pickables.push(mMesh);
 
-  const moonBody = { mesh: mMesh, group: mGroup, data: md, parent: parentBody, moonKey };
+  const moonBody = { mesh: mMesh, group: mGroup, data: md, parent: parentBody, moonKey,
+                     dir: md.retro ? -1 : 1 };   // retrograde moons orbit backwards
   parentBody.moons.push(moonBody);
   return moonBody;
 }
@@ -1125,6 +1219,316 @@ for (const [moonKey, md] of Object.entries(MOONS)) {
   const parent = bodies.find((b) => b.data.key === md.parent);
   if (parent) allMoons.push(makeMoon(parent, moonKey));
 }
+
+/* ================= GLOW TEXTURE (shared by comet, spacecraft, etc.) ================= */
+function makeGlowTexture(inner, outer) {
+  const S = 128, c = document.createElement("canvas");
+  c.width = c.height = S;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(S/2, S/2, 0, S/2, S/2, S/2);
+  g.addColorStop(0, inner);
+  g.addColorStop(0.35, outer);
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, S, S);
+  return new THREE.CanvasTexture(c);
+}
+
+/* ================= ASTEROID + KUIPER BELTS =================
+   Each belt is a cloud of Points in a ring. The whole group rotates to
+   simulate orbital motion (average period of the belt). */
+function createBelt(count, rMin, rMax, ySpread, color, size, opacity) {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = rMin + Math.random() * (rMax - rMin);
+    pos[i * 3]     = r * Math.cos(a);
+    pos[i * 3 + 1] = (Math.random() - 0.5) * 2 * ySpread;
+    pos[i * 3 + 2] = r * Math.sin(a);
+  }
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({ color, size, transparent: true, opacity, sizeAttenuation: true, depthWrite: false });
+  const g = new THREE.Group();
+  g.add(new THREE.Points(geo, mat));
+  scene.add(g);
+  return g;
+}
+const asteroidBeltGroup = createBelt(2500, 33, 40, 1.5, 0x8a7a6a, 0.18, 0.55);
+const kuiperBeltGroup   = createBelt(5000, 95, 140, 3,   0x5a6a7a, 0.22, 0.35);
+
+function updateBelts(T) {
+  asteroidBeltGroup.rotation.y = (T / 1642)  * Math.PI * 2;  // ~4.5 yr avg period
+  kuiperBeltGroup.rotation.y   = (T / 91250) * Math.PI * 2;  // ~250 yr avg period
+}
+
+/* ================= COMET (Halley-type, highly eccentric) =================
+   Uses the same Keplerian machinery as the planets. a=1 AU mapped to
+   COMET_DIST scene units; e=0.85 gives a dramatic swing from near the
+   Sun out past Pluto. Period ~75 yr (LD=480 deg/century). */
+ORB_EL.comet = { a: 1, e: 0.85, i: 20, O: 30, w: 45, L: 90,
+                 aD: 0, eD: 0, iD: 0, OD: 0, wD: 0, LD: 480 };
+const COMET_DIST = 50;
+const cometGroup = new THREE.Group();
+let cometGlowSprite, cometTailSprite;
+{
+  const nucleus = new THREE.Mesh(
+    new THREE.SphereGeometry(0.25, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xaaddff })
+  );
+  cometGroup.add(nucleus);
+
+  const glowTex = makeGlowTexture("rgba(180,220,255,1)", "rgba(100,180,255,0.6)");
+  cometGlowSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+  }));
+  cometGlowSprite.scale.setScalar(3);
+  cometGroup.add(cometGlowSprite);
+
+  const tailTex = makeGlowTexture("rgba(150,200,255,0.8)", "rgba(80,150,255,0.3)");
+  cometTailSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tailTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+  }));
+  cometGroup.add(cometTailSprite);
+
+  // Faint orbit line
+  const cpts = orbitPathPoints("comet", COMET_DIST, 256);
+  const cl = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(cpts),
+    new THREE.LineBasicMaterial({ color: 0x4488cc, transparent: true, opacity: 0.22 })
+  );
+  scene.add(cl);
+  orbitLines.push(cl);
+}
+scene.add(cometGroup);
+
+function updateComet(T) {
+  const pos = keplerPosition("comet", T, COMET_DIST);
+  cometGroup.position.copy(pos);
+  const dSun = Math.max(pos.length(), 1);
+  const dir = pos.clone().normalize();
+  // Tail grows and brightens as the comet nears the Sun
+  const tailLen = Math.max(2, 14 * (10 / dSun));
+  const tailWid = Math.max(0.5, 3.5 * (10 / dSun));
+  cometTailSprite.scale.set(tailWid, tailLen, 1);
+  cometTailSprite.position.copy(dir.multiplyScalar(tailLen * 0.45));
+  cometGlowSprite.scale.setScalar(Math.max(1.5, 5 * (8 / dSun)));
+}
+
+/* ================= CONSTELLATIONS =================
+   Five classic constellations drawn as faint lines + bright star points
+   on a large sphere (radius CONST_R) just inside the starfield. */
+const CONST_R = 1800;
+const CONST_DATA = [
+  { name: "Orion",
+    stars: [[88.79,7.41],[78.63,-8.20],[81.28,6.35],[85.19,-1.94],[84.05,-1.20],[83.00,-0.30],[86.94,-9.67]],
+    lines: [[0,2],[2,5],[5,4],[4,3],[3,1],[3,6],[1,6],[0,3]] },
+  { name: "Ursa Major",
+    stars: [[165.93,61.75],[165.46,56.38],[178.46,53.69],[183.86,57.03],[193.51,55.96],[200.98,54.93],[213.91,49.31]],
+    lines: [[0,1],[1,2],[2,3],[3,0],[3,4],[4,5],[5,6]] },
+  { name: "Cassiopeia",
+    stars: [[2.29,59.15],[10.13,56.54],[21.45,60.72],[31.19,60.24],[42.51,63.67]],
+    lines: [[0,1],[1,2],[2,3],[3,4]] },
+  { name: "Cygnus",
+    stars: [[310.36,45.28],[299.83,40.26],[305.65,33.97],[292.68,45.13],[292.68,27.96]],
+    lines: [[0,1],[1,2],[1,3],[3,4]] },
+  { name: "Scorpius",
+    stars: [[247.35,-26.43],[263.40,-37.10],[264.33,-43.00],[240.08,-22.62],[242.77,-19.81]],
+    lines: [[4,3],[3,0],[0,1],[1,2]] },
+];
+const constellationGroup = (function () {
+  const g = new THREE.Group();
+  const lv = [], sv = [];
+  for (const con of CONST_DATA) {
+    const sp = con.stars.map(([ra, dec]) => {
+      const a = THREE.MathUtils.degToRad(ra), d = THREE.MathUtils.degToRad(dec);
+      return new THREE.Vector3(
+        CONST_R * Math.cos(d) * Math.cos(a),
+        CONST_R * Math.sin(d),
+        -CONST_R * Math.cos(d) * Math.sin(a)
+      );
+    });
+    sp.forEach(p => sv.push(p.x, p.y, p.z));
+    con.lines.forEach(([a, b]) => {
+      lv.push(sp[a].x, sp[a].y, sp[a].z, sp[b].x, sp[b].y, sp[b].z);
+    });
+  }
+  const lg = new THREE.BufferGeometry();
+  lg.setAttribute("position", new THREE.Float32BufferAttribute(lv, 3));
+  g.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x4488cc, transparent: true, opacity: 0.35 })));
+  const sg = new THREE.BufferGeometry();
+  sg.setAttribute("position", new THREE.Float32BufferAttribute(sv, 3));
+  g.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xaaccff, size: 3, sizeAttenuation: false, transparent: true, opacity: 0.9 })));
+  g.visible = false;
+  scene.add(g);
+  return g;
+})();
+
+/* ================= LIVE SPACECRAFT POSITIONS =================
+   Approximated trajectories for well-known active spacecraft.
+   "escape" = heliocentric escape (straight-line from a J2000 reference point).
+   "orbit"  = circular orbit around a parent body. */
+const SC_DATA = [
+  { name: "Voyager 1", type: "escape", refPos: [400, 25, -320], vel: [0.0035, 0.0002, -0.0025],
+    desc: "Launched 1977. Farthest human-made object (~165+ AU). In interstellar space since 2012." },
+  { name: "Voyager 2", type: "escape", refPos: [320, -18, -260], vel: [0.0028, -0.0001, -0.002],
+    desc: "Launched 1977. Only spacecraft to visit all four giant planets. In interstellar space since 2018." },
+  { name: "New Horizons", type: "escape", refPos: [130, 10, -105], vel: [0.0018, 0.0001, -0.0012],
+    desc: "Launched 2006. Flew past Pluto in 2015. Now exploring the Kuiper Belt." },
+  { name: "Parker Solar Probe", type: "orbit", parent: "sun", radius: 6, period: 88,
+    desc: "Launched 2018. Fastest human-made object, diving into the Sun's corona." },
+  { name: "Juno", type: "orbit", parent: "jupiter", radius: 4.6, period: 11,
+    desc: "Launched 2011. Studying Jupiter's atmosphere and magnetosphere." },
+];
+const scLabelWrap = document.createElement("div");
+scLabelWrap.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:3;overflow:hidden";
+document.body.appendChild(scLabelWrap);
+const spacecraft = (function () {
+  const g = new THREE.Group();
+  const glowTex = makeGlowTexture("rgba(120,200,255,1)", "rgba(60,140,255,0.5)");
+  const items = [];
+  for (const sc of SC_DATA) {
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    sprite.scale.setScalar(1.5);
+    g.add(sprite);
+    const el = document.createElement("div");
+    el.textContent = sc.name;
+    el.style.cssText = "position:absolute;transform:translate(-50%,-160%);font-size:10px;letter-spacing:1px;color:#7fd4ff;text-shadow:0 0 6px #000,0 1px 2px #000;white-space:nowrap;opacity:0;transition:opacity .25s";
+    scLabelWrap.appendChild(el);
+    items.push({ data: sc, sprite, label: el });
+  }
+  scene.add(g);
+  return { group: g, items };
+})();
+
+function updateSpacecraft(T) {
+  const show = document.getElementById("spacecraft").checked;
+  for (const item of spacecraft.items) {
+    const sc = item.data;
+    let pos;
+    if (sc.type === "escape") {
+      pos = new THREE.Vector3(
+        sc.refPos[0] + sc.vel[0] * T,
+        sc.refPos[1] + sc.vel[1] * T,
+        sc.refPos[2] + sc.vel[2] * T
+      );
+    } else {
+      const pb = sc.parent === "sun" ? null : bodies.find(b => b.data.key === sc.parent);
+      const pp = pb ? pb.mesh.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3(0, 0, 0);
+      const ang = (T / sc.period) * Math.PI * 2;
+      pos = new THREE.Vector3(
+        pp.x + sc.radius * Math.cos(ang),
+        pp.y + sc.radius * 0.15 * Math.sin(ang * 0.7),
+        pp.z + sc.radius * Math.sin(ang)
+      );
+    }
+    item.sprite.position.copy(pos);
+    if (!show) { item.label.style.opacity = 0; continue; }
+    const pv = pos.clone().project(camera);
+    if (pv.z > 1) { item.label.style.opacity = 0; continue; }
+    item.label.style.opacity = 0.85;
+    item.label.style.left = ((pv.x * 0.5 + 0.5) * innerWidth) + "px";
+    item.label.style.top  = ((-pv.y * 0.5 + 0.5) * innerHeight) + "px";
+  }
+}
+
+/* ================= ECLIPSE SHADOWS =================
+   Enables Three.js shadow mapping so the Sun (point light) casts shadows
+   onto planets and moons. Visible effects: lunar eclipses (Earth's shadow
+   on the Moon), solar eclipses (Moon's shadow on Earth), Io transits on
+   Jupiter, etc. The shadow camera covers ~300 scene units (inner system). */
+function setupShadows(enabled) {
+  renderer.shadowMap.enabled = enabled;
+  sunLight.castShadow = enabled;
+  if (enabled) {
+    sunLight.shadow.mapSize.set(1024, 1024);
+    sunLight.shadow.camera.near = 1;
+    sunLight.shadow.camera.far = 300;
+    sunLight.shadow.bias = -0.002;
+  }
+  bodies.forEach(b => {
+    b.mesh.castShadow = enabled;
+    b.mesh.receiveShadow = enabled;
+    b.mesh.material.needsUpdate = true;
+  });
+  allMoons.forEach(m => {
+    m.mesh.castShadow = enabled;
+    m.mesh.receiveShadow = enabled;
+    m.mesh.material.needsUpdate = true;
+  });
+}
+
+/* ================= SPEED PRESETS ================= */
+const SPEED_PRESETS = [
+  { label: "1×",    value: 1 },
+  { label: "100×",  value: 100 },
+  { label: "1K×",   value: 1000 },
+  { label: "10K×",  value: 10000 },
+  { label: "1M×",   value: 1000000 },
+  { label: "10M×",  value: 10000000 },
+  { label: "1B×",   value: 1000000000 },
+];
+function highlightPreset(value) {
+  document.querySelectorAll("#speedPresets button").forEach(b =>
+    b.classList.toggle("sel", +b.dataset.speed === value));
+}
+(function createSpeedPresets() {
+  const bar = document.getElementById("speedPresets");
+  SPEED_PRESETS.forEach(p => {
+    const btn = document.createElement("button");
+    btn.textContent = p.label;
+    btn.dataset.speed = p.value;
+    btn.onclick = () => { setSpeed(p.value, "preset"); highlightPreset(p.value); };
+    bar.appendChild(btn);
+  });
+})();
+
+/* ================= SCREENSHOT / PHOTO MODE =================
+   Captures the current WebGL canvas as a PNG. The renderer is created
+   with preserveDrawingBuffer:true so toDataURL() works reliably. */
+function captureScreenshot() {
+  const flash = document.getElementById("ssFlash");
+  flash.style.opacity = "0.7";
+  setTimeout(() => { flash.style.opacity = "0"; }, 150);
+  renderer.render(scene, camera);
+  const a = document.createElement("a");
+  a.href = renderer.domElement.toDataURL("image/png");
+  a.download = "solar-system-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+async function copyScreenshot() {
+  renderer.render(scene, camera);
+  try {
+    const blob = await (await fetch(renderer.domElement.toDataURL("image/png"))).blob();
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    const btn = document.getElementById("ssCopy");
+    const orig = btn.textContent;
+    btn.textContent = "\u2713 Copied!";
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (e) { console.error("Clipboard copy failed:", e); }
+}
+document.getElementById("ssCapture").onclick = captureScreenshot;
+document.getElementById("ssCopy").onclick = copyScreenshot;
+
+/* ================= FEATURE TOGGLES =================
+   Wires the checkboxes in the controls panel to show/hide each feature. */
+(function setupFeatureToggles() {
+  const t = (id, fn) => {
+    const el = document.getElementById(id);
+    el.addEventListener("change", () => fn(el.checked));
+    fn(el.checked);
+  };
+  t("asteroidBelt",   v => { asteroidBeltGroup.visible = v; });
+  t("kuiperBelt",     v => { kuiperBeltGroup.visible = v; });
+  t("comet",          v => { cometGroup.visible = v; });
+  t("spacecraft",     v => { spacecraft.group.visible = v; });
+  t("constellations", v => { constellationGroup.visible = v; });
+  t("shadows",        v => { setupShadows(v); });
+})();
 
 /* ================= STATE ================= */
 let timeScale = 1, paused = false, sizeFactor = 1, realScale = false;
@@ -1224,9 +1628,10 @@ function updatePositions(T, now) {
       b.mesh.rotation.y = (T / b.data.day) * Math.PI * 2;
     }
     if (b.cloudMesh) b.cloudMesh.rotation.y = T * 0.9;
-    // Rotate all moons of this planet (each with its own orbital period)
+    // Rotate all moons of this planet (each with its own orbital period).
+    // m.dir is -1 for retrograde moons (e.g. Triton), so they orbit backwards.
     for (const m of (b.moons || [])) {
-      m.group.rotation.y = (T / m.data.period) * Math.PI * 2;
+      m.group.rotation.y = m.dir * (T / m.data.period) * Math.PI * 2;
     }
   }
   earthBody.mesh.material.uniforms.uTime.value = now * 0.6 + T * 0.02;
@@ -1265,6 +1670,9 @@ setInterval(() => {
   const now = performance.now() * 0.001;
   updatePositions(T, now);
   updateCosmos(T, now, 0.06);
+  updateBelts(T);
+  updateComet(T);
+  updateSpacecraft(T);
   if (focused && !camAnim) {
     focused.mesh.getWorldPosition(_v);
     const dx = _v.x - controls.target.x, dy = _v.y - controls.target.y, dz = _v.z - controls.target.z;
@@ -1294,6 +1702,10 @@ function animate() {
   updatePositions(T, now);
 
   updateCosmos(T, now, dt);
+
+  updateBelts(T);
+  updateComet(T);
+  updateSpacecraft(T);
 
   // camera follow: after the fly-in animation, travel *with* the body so the
   // camera keeps its offset (orbit/zoom/pan) while the planet moves underneath it
@@ -1539,6 +1951,7 @@ function setSpeed(v, fromSlider) {
   $("speedHint").textContent = speedHint(timeScale);
   if (fromSlider !== "slider") $("speed").value = speedToSlider(timeScale);
   if (fromSlider !== "num") $("speedNum").value = +timeScale.toFixed(2);
+  highlightPreset(timeScale);
 }
 $("speed").oninput = (e) => setSpeed(sliderToSpeed(+e.target.value), "slider");
 $("speedNum").oninput = (e) => setSpeed(+e.target.value, "num");
@@ -1680,6 +2093,7 @@ addEventListener("keydown", (e) => {
   else if (e.key === "r" || e.key === "R") resetView();
   else if (e.key === "l" || e.key === "L") { $("labels").checked = !$("labels").checked; }
   else if (e.key === "o" || e.key === "O") { $("orbits").checked = !$("orbits").checked; $("orbits").onchange({ target: $("orbits") }); }
+  else if (e.key === "p" || e.key === "P") { captureScreenshot(); }
   else if (/^[1-9]$/.test(e.key)) {
     const i = +e.key - 1;
     const list = [ { mesh: sunMesh, data: SUN }, ...bodies ];
