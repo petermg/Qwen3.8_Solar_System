@@ -194,6 +194,11 @@
     <button id="eclipseBtn">🌑 Eclipses</button>
     <button id="earthViewBtn">🌍 Earth view</button>
   </div>
+  <div class="btns" style="margin-top:6px">
+    <button id="eclipsePathBtn" title="Trace the Moon's shadow path across Earth in real time">🌘 Eclipse path</button>
+    <button id="trueScaleBtn" title="Snap everything to real scale and fly out to see the system">🔭 True scale</button>
+    <button id="solarWindBtn" title="Corotating solar wind + CME shock fronts">💨 Solar wind</button>
+  </div>
 </div>
 
 <div class="panel" id="moonBar"></div>
@@ -632,7 +637,15 @@ float eclipseShadow(vec3 P, out float earthGlow, out float earthDepth, out float
     // no totality). The penumbra spans 2*thetaSun around it, so the fade width
     // tracks the Sun's apparent size — bigger Sun = wider, softer penumbra.
     float umbraHalf = max(0.0, thetaCaster - thetaSun);
-    float sf = smoothstep(umbraHalf, umbraHalf + 2.0 * thetaSun, phi); // 0 umbra, 1 lit
+    // Maximum shadow DEPTH a caster can produce = the fraction of the Sun's disc
+    // it can cover. A caster smaller than the Sun (e.g. a distant planet/moon)
+    // can only ever dim by (thetaCaster/thetaSun)^2 — it can't cast a 100%-dark
+    // spot. This is what stops tiny far-off bodies (Deimos, Mars, …) from
+    // smearing a deep shadow across a distant planet. A big caster (Moon on
+    // Earth, Earth on Moon) saturates at 1 → full totality, as before.
+    float maxDim = min(1.0, (thetaCaster / thetaSun) * (thetaCaster / thetaSun));
+    float sfRaw = smoothstep(umbraHalf, umbraHalf + 2.0 * thetaSun, phi); // 0 umbra, 1 lit
+    float sf = 1.0 - (1.0 - sfRaw) * maxDim;   // scale the dimming by disc coverage
     f = min(f, sf);
     // Earth-only refracted-light factors (lunar-eclipse glow). depth = 1 at the
     // umbra centre -> 0 at the umbra edge (drives the blue->red colour blend and
@@ -1223,6 +1236,230 @@ const cmes = [];
 
 }
 
+/* ================= SOLAR WIND + CME STREAMS =================
+   A corotating Parker-spiral solar wind: thousands of soft additive particles
+   are emitted from the rotating Sun and flow outward, winding into the iconic
+   "windmill" spiral (the heliospheric current sheet). Every particle's position
+   is a PURE FUNCTION of the sim time T (age = T - birth), so the whole stream is
+   a deterministic field: pausing, fast-forwarding and date-jumps all "just work"
+   (a jump to a new T instantly re-lays the correct spiral). The wind is dense in
+   the equatorial band and fainter at the poles.
+   CMEs: occasional bright burst shells (billowing plasma + a fresnel shock front)
+   that expand outward; when a shell crosses a planet's distance from the Sun the
+   planet's magnetosphere flashes and a toast is shown. */
+const SW = {
+  N: 4200,
+  rMin: 4.0, rMax: 150.0,
+  vMin: 3.0, vMax: 8.0,
+  sunRot: 25.38,
+  on: true,
+  wind: null,
+  cmeNext: 12,
+  cmes: [],
+  prevT: 0,
+};
+const SW_CME = { speed: 2.0, life: 125.0, spawnEvery: 30.0, size0: 2.6, maxK: 1.15 };
+
+function _windInitAttrs() {
+  const n = SW.N;
+  const birth = new Float32Array(n), rad = new Float32Array(n),
+        az = new Float32Array(n), pol = new Float32Array(n),
+        sp = new Float32Array(n), kind = new Float32Array(n);
+  // Seed the field at the *current* sim time so the spiral is fully populated on
+  // load (not a bunched blob). The sim starts at the real "now", so T_now can be
+  // derived directly from the wall clock + the J2000 epoch (the simMs/J2000_MS
+  // module vars are not yet initialised at this point in the script). Each
+  // particle is placed at a uniformly random radius across [rMin, rMax] at T0,
+  // which yields an even, fully-wound Parker spiral from frame one.
+  const T0 = (Date.now() - Date.UTC(2000, 0, 1, 12)) / 86400000;
+  for (let i = 0; i < n; i++) {
+    rad[i] = SW.rMin + Math.random() * 0.8;            // emit near the Sun's limb
+    sp[i] = SW.vMin + Math.random() * (SW.vMax - SW.vMin);
+    const dTarget = SW.rMin + Math.random() * (SW.rMax - SW.rMin); // random radius now
+    birth[i] = T0 - (dTarget - rad[i]) / sp[i];        // birth that lands it at dTarget at T0
+    az[i] = Math.random() * Math.PI * 2;               // corotation angle at birth
+    const r = Math.random();
+    pol[i] = (r < 0.62) ? (Math.random() - 0.5) * 0.5 : Math.acos(2 * Math.random() - 1); // equatorial-biased
+    kind[i] = 0;
+  }
+  return { birth, rad, az, pol, sp, kind };
+}
+function makeWindPoints() {
+  const n = SW.N;
+  const pos = new Float32Array(n * 3);
+  const A = _windInitAttrs();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("aBirth", new THREE.BufferAttribute(A.birth, 1));
+  geo.setAttribute("aRad",   new THREE.BufferAttribute(A.rad, 1));
+  geo.setAttribute("aAz",    new THREE.BufferAttribute(A.az, 1));
+  geo.setAttribute("aPol",   new THREE.BufferAttribute(A.pol, 1));
+  geo.setAttribute("aSpd",   new THREE.BufferAttribute(A.sp, 1));
+  geo.setAttribute("aKind",  new THREE.BufferAttribute(A.kind, 1));
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: { uT: { value: 0 }, uCamH: { value: 1 }, uSize: { value: 950.0 } },
+    vertexShader: `
+      uniform float uT;
+      attribute float aBirth, aRad, aAz, aPol, aSpd, aKind;
+      uniform float uCamH, uSize;
+      varying float vFade; varying vec3 vColor;
+      void main() {
+        float age  = uT - aBirth;
+        float d    = aRad + aSpd * age;               // radius from the Sun
+        float om   = 6.2831853 / ${SW.sunRot.toFixed(3)};
+        float ph   = aAz + om * age;                 // corotation → Parker spiral
+        float cp   = cos(aPol), sp2 = sin(aPol);
+        vec3 P = vec3(d * cp * cos(ph), d * sp2, d * cp * sin(ph));
+        vFade = smoothstep(0.0, 3.0, d) * (1.0 - smoothstep(${(SW.rMax * 0.7).toFixed(1)}, ${SW.rMax.toFixed(1)}, d));
+        float f = smoothstep(${SW.rMin.toFixed(1)}, ${SW.rMax.toFixed(1)}, d);
+        vColor = mix(vec3(1.0, 0.62, 0.24), vec3(0.42, 0.62, 1.0), f);
+        vColor += vec3(0.5, 0.4, 0.3) * aKind;       // CME particles run hotter
+        vec4 mv = modelViewMatrix * vec4(P, 1.0);
+        float depth = max(1.0, -mv.z);
+        gl_PointSize = clamp(uSize / depth, 1.0, 90.0);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      varying float vFade; varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d2 = dot(uv, uv);
+        float core = exp(-d2 * 30.0);
+        float halo = exp(-d2 * 6.0) * 0.5;
+        float a = (core + halo) * vFade;
+        if (a < 0.012) discard;
+        gl_FragColor = vec4(vColor * (core + halo * 0.6), a * 0.85);
+      }`,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  pts.renderOrder = 4;
+  scene.add(pts);
+  return pts;
+}
+function updateWind(uT, camH) {
+  if (!SW.on) return;
+  SW.wind.material.uniforms.uT.value = uT;
+  SW.wind.material.uniforms.uCamH.value = camH;
+  const pos = SW.wind.geometry.getAttribute("position").array;
+  const birth = SW.wind.geometry.getAttribute("aBirth").array;
+  const rad = SW.wind.geometry.getAttribute("aRad").array;
+  const az = SW.wind.geometry.getAttribute("aAz").array;
+  const pol = SW.wind.geometry.getAttribute("aPol").array;
+  const sp = SW.wind.geometry.getAttribute("aSpd").array;
+  const n = SW.N, om = (Math.PI * 2) / SW.sunRot;
+  for (let i = 0; i < n; i++) {
+    const age = uT - birth[i];
+    const d = rad[i] + sp[i] * age;
+    if (d > SW.rMax) {
+      birth[i] = uT;                                  // recycle: re-emit at the limb
+      continue;
+    }
+    const ph = az[i] + om * age;
+    const cp = Math.cos(pol[i]);
+    pos[i * 3]     = d * cp * Math.cos(ph);
+    pos[i * 3 + 1] = d * Math.sin(pol[i]);
+    pos[i * 3 + 2] = d * cp * Math.sin(ph);
+  }
+  SW.wind.geometry.getAttribute("position").needsUpdate = true;
+}
+function makeCmeShell() {
+  const c = document.createElement("canvas"); c.width = c.height = 256;
+  const x = c.getContext("2d");
+  for (let i = 0; i < 26; i++) {
+    const px = 128 + (Math.random() - 0.5) * 150, py = 128 + (Math.random() - 0.5) * 150, r = 30 + Math.random() * 70;
+    const g = x.createRadialGradient(px, py, 0, px, py, r);
+    g.addColorStop(0, "rgba(255,235,190,0.10)");
+    g.addColorStop(0.5, "rgba(255,150,50,0.06)");
+    g.addColorStop(1, "rgba(150,40,10,0)");
+    x.fillStyle = g; x.beginPath(); x.arc(px, py, r, 0, 6.2832); x.fill();
+  }
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    uniforms: { uT: { value: 0 }, uTex: { value: tex } },
+    vertexShader: `varying vec3 vN; varying vec3 vV; varying vec3 vW;
+      void main(){ vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position,1.0); vV = normalize(-mv.xyz); vW = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * mv; }`,
+    fragmentShader: `
+      uniform float uT; uniform sampler2D uTex;
+      varying vec3 vN; varying vec3 vV; varying vec3 vW;
+      void main(){
+        float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+        float shell = pow(rim, 1.8);
+        float billow = texture2D(uTex, vW.xz / (2.0 * (uT * ${SW_CME.speed.toFixed(2)} + ${SW_CME.size0.toFixed(2)}) * 0.6 + 0.5)).r;
+        float k = clamp(uT / ${SW_CME.life.toFixed(2)}, 0.0, 1.0);
+        float a = (0.12 + 0.5 * billow) * (1.0 - k);
+        vec3 col = mix(vec3(1.0, 0.55, 0.2), vec3(0.5, 0.7, 1.0), k);
+        gl_FragColor = vec4(col * (0.3 + 0.7 * shell), a * 0.5);
+      }`,
+  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), mat);
+  mesh.visible = false;
+  mesh.renderOrder = 3;
+  return mesh;
+}
+function _disposeCmeMesh(m) {
+  scene.remove(m);
+  m.geometry.dispose();
+  m.material.uniforms.uTex.value.dispose();
+  m.material.dispose();
+}
+function updateCmes(T, dt) {
+  if (!SW.on) {
+    for (const c of SW.cmes) _disposeCmeMesh(c.mesh);
+    SW.cmes.length = 0;
+    return;
+  }
+  const dT = T - SW.prevT;
+  // A big time jump (date change / fast scrub): drop stale CMEs so they don't
+  // flood the view, and reschedule the next spawn from "now".
+  if (dT > 2.0 || dT < -0.05) {
+    for (const c of SW.cmes) _disposeCmeMesh(c.mesh);
+    SW.cmes.length = 0;
+    SW.cmeNext = T + 4;
+  } else if (T >= SW.cmeNext) {
+    const a = (T * 1.37) % (Math.PI * 2);
+    const pol = Math.acos(2 * Math.abs(Math.sin(T * 3.13 + 1.0)) - 1.0) * 0.5; // mostly equatorial
+    const dir = new THREE.Vector3(Math.sin(pol) * Math.cos(a), Math.cos(pol), Math.sin(pol) * Math.sin(a));
+    const cme = { t0: T, dir, hit: {}, mesh: makeCmeShell() };
+    scene.add(cme.mesh);
+    SW.cmes.push(cme);
+    SW.cmeNext = T + SW_CME.spawnEvery * (0.6 + 0.8 * Math.abs(Math.sin(T * 2.7 + 0.5)));
+  }
+  for (let i = SW.cmes.length - 1; i >= 0; i--) {
+    const cme = SW.cmes[i];
+    const age = T - cme.t0;
+    if (age > SW_CME.life || age < -1e-6) {
+      _disposeCmeMesh(cme.mesh);
+      SW.cmes.splice(i, 1);
+      continue;
+    }
+    const dist = SW_CME.size0 + SW_CME.speed * age;
+    cme.mesh.position.copy(cme.dir).multiplyScalar(dist);
+    cme.mesh.scale.setScalar(SW_CME.size0 + 0.5 * age);
+    cme.mesh.visible = true;
+    cme.mesh.material.uniforms.uT.value = age;
+    // magnetosphere hits (forward playback only) — use the planet's live
+    // world position (b.worldPos is never populated, so query the mesh).
+    if (dt > 0 && dt < 1.0) {
+      for (const b of bodies) {
+        if (b.data.key === "sun") continue;
+        const dSun = b.mesh.getWorldPosition(_cmeV).length();
+        if (dSun < dist && dSun > SW.rMin && !cme.hit[b.data.key]) {
+          cme.hit[b.data.key] = true;
+          flashMagnetosphere(b, 1.0);
+          toast(`⚡ CME shock front reached ${b.data.name || b.data.key}`);
+        }
+      }
+    }
+  }
+  SW.prevT = T;
+}
+const _cmeV = new THREE.Vector3();
+SW.wind = makeWindPoints();
+
+
 /* ================= PLANET BUILDING ================= */
 const bodies = [];      // { mesh, orbitGroup, holder, data, worldPos, cloudMesh?, ringMesh? }
 const pickables = [];
@@ -1720,6 +1957,27 @@ DATA.forEach((d) => { if (d.key !== "earth") makePlanet(d); });
 pickables.push(sunMesh);
 sunMesh.userData.body = SUN;
 
+/* Magnetosphere halos — a faint shell around each planet that flashes when a
+   CME shock front sweeps past (see updateCmes). Built once the planets exist. */
+function makeMagnetospheres() {
+  const tex = makeGlowTexture("rgba(150,220,255,0.9)", "rgba(80,150,255,0.4)");
+  for (const b of bodies) {
+    if (b.data.key === "sun") continue;
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(b.data.r * 2.6, 32, 24),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide })
+    );
+    m.renderOrder = 5;
+    b.mesh.add(m);
+    b.magnetosphere = { mesh: m, t: -1 };
+  }
+}
+function flashMagnetosphere(b, k) {
+  if (!b.magnetosphere) return;
+  b.magnetosphere.t = k;   // decays in refreshHud
+}
+makeMagnetospheres();
+
 /* Create all moons (attached to their parent planets) */
 const allMoons = [];
 for (const [moonKey, md] of Object.entries(MOONS)) {
@@ -2156,6 +2414,11 @@ document.getElementById("ssCopy").onclick = copyScreenshot;
 
 /* ================= STATE ================= */
 let timeScale = 1, paused = false, sizeFactor = 1, realScale = false;
+let eclipsePathOn = false;         // "Eclipse path on the globe" feature
+let eclipsePathTrail = null;       // tube-band Mesh tracing the shadow (child of Earth mesh)
+let eclipsePathDot = null;         // bright marker at the current shadow-spot
+const ECL_TRAIL_STEPS = 36;        // trail sample count (5-min intervals over 3 h)
+const ECL_TUBE_SEGS = 8;           // radial segments of the tube band
 let focused = null;          // body object being followed
 let camFollowDist = 0;
 let tourIdx = -1, tourTimer = null;
@@ -2325,7 +2588,10 @@ setInterval(() => {
   updatePositions(T, now);
   updateEclipseCasters();
   updateRingShadows();
+  updateEclipsePath(T, now);
   updateCosmos(T, now, 0.06);
+  updateWind(T, camera.position.length());
+  updateCmes(T, 0);   // dt=0: advance the field, suppress CME-hit flashes
   updateBelts(T);
   updateComet(T);
   updateSpacecraft(T);
@@ -2357,11 +2623,16 @@ function animate() {
 
   // Days since J2000 epoch
   const T = (simMs - J2000_MS) / 86400000;
+  T_now = T;
   updatePositions(T, now);
   updateEclipseCasters();
   updateRingShadows();
+  updateEclipsePath(T, now);
 
   updateCosmos(T, now, dt);
+
+  updateWind(T, camera.position.length());
+  updateCmes(T, dt);
 
   updateBelts(T);
   updateComet(T);
@@ -2659,6 +2930,7 @@ function setSimDate(ms) {
   // Reposition immediately (works even if the render loop is throttled)
   const T = (simMs - J2000_MS) / 86400000;
   updatePositions(T, performance.now() * 0.001);
+  if (typeof updateEclipsePath === "function") updateEclipsePath(T, performance.now() * 0.001);
   renderer.render(scene, camera);
   msToInputs(simMs);
   if (typeof refreshHud === "function") refreshHud();
@@ -2986,9 +3258,284 @@ function updateBodyStats() {
 
 /* Refresh both HUD readouts (called from the animation loop + focus changes) */
 function refreshHud() {
+  // Magnetosphere flash decay (CME hits)
+  for (const b of bodies) {
+    const mg = b.magnetosphere;
+    if (mg && mg.t > 0) {
+      mg.t = Math.max(0, mg.t - 0.012);
+      mg.mesh.material.opacity = mg.t * 0.55;
+    }
+  }
   updateMoonPhase();
   updateBodyStats();
 }
+
+/* ================= ECLIPSE PATH ON THE GLOBE =================
+   When active, every frame we compute the **Moon's shadow centre** on Earth —
+   the point where the Sun→Moon ray strikes the surface (the centre of the
+   umbra, i.e. the centre of the dark disc you see). As the sim advances the
+   points trace the **path of totality** sweeping across the globe, exactly like
+   a real eclipse forecast. The line + a glowing "now" marker are children of
+   the Earth mesh, so they sit on the surface and rotate with the planet.
+   (The shadow centre ≠ the sub-lunar point except at exact new-moon; in this
+   artistic-scale sim the Moon is large, so the offset is real — the shadow
+   centre is what the rendered shadow follows.)
+   Geographic frame (see earthRotationY docs): Greenwich (0° lon) = +X, east
+   longitude φ → (cos φ, 0, −sin φ), up = +Y. So a direction (dx,dy,dz) has
+   lon = atan2(−dz, dx), lat = asin(dy). */
+
+/* Minimal transient toast (bottom-centre). Creates its own element on demand. */
+let _toastEl = null, _toastTimer = null;
+function toast(msg, ms = 2600) {
+  if (!_toastEl) {
+    _toastEl = document.createElement("div");
+    _toastEl.style.cssText = "position:fixed;bottom:64px;left:50%;transform:translateX(-50%) translateY(8px);" +
+      "background:rgba(18,28,52,0.94);border:1px solid var(--line);color:#dfe8ff;padding:8px 14px;" +
+      "border-radius:8px;font-size:12px;z-index:2000;opacity:0;transition:opacity .2s,transform .2s;" +
+      "pointer-events:none;max-width:80vw;text-align:center";
+    document.body.appendChild(_toastEl);
+  }
+  _toastEl.textContent = msg;
+  _toastEl.style.opacity = "1";
+  _toastEl.style.transform = "translateX(-50%) translateY(0)";
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { _toastEl.style.opacity = "0"; _toastEl.style.transform = "translateX(-50%) translateY(8px)"; }, ms);
+}
+/* Sub-lunar point in the Earth mesh's LOCAL (spinning) frame.
+   The dot/line are children of the Earth mesh, so they live in the mesh's local
+   space — which is rotated by the planet's spin (and the holder's axial tilt).
+   To place the marker at the true sub-lunar point we must express the
+   Earth→Moon direction in that same local frame, not the raw world frame.
+   Method: (1) take the Moon's *actual* world position (already placed this
+   frame by updatePositions) minus Earth's world position, (2) rotate that
+   direction into the mesh's local frame via the inverse of the mesh's world
+   orientation, (3) read geographic (lon, lat) off the local direction using the
+   same convention as earthRotationY (Greenwich = +X, east → −Z, up = +Y). */
+const _ssV1 = new THREE.Vector3(), _ssV2 = new THREE.Vector3(), _ssV3 = new THREE.Vector3();
+const _ssQ1 = new THREE.Quaternion(), _ssQ2 = new THREE.Quaternion();
+/* Moon's WORLD position at time T = heliocentric Earth + geocentric Moon.
+   The Moon group's local position is de-tilted to *cancel* the holder's axial
+   tilt, so after the holder applies it the world offset is simply the scene
+   geocentric vector M. (Mirrors updatePositions: holder tilt ∘ de-tilt = identity.) */
+function _moonWorldPos(T, out) {
+  const E = keplerPosition("earth", T, earthBody._dist ?? earthBody.data.dist);
+  const M = moonRelScene(T, MOON ? MOON.dist : 2.2);   // geocentric scene coords
+  out.set(E.x + M.x, E.y + M.y, E.z + M.z);
+  return out;
+}
+/* World-space position of the Moon's shadow centre on Earth at time T, or null
+   when the shadow misses the globe (no solar eclipse in progress). The umbra
+   centre is where the Sun(origin)→Moon ray strikes Earth's surface. */
+function _shadowCenterWorld(T, out) {
+  const E = keplerPosition("earth", T, earthBody._dist ?? earthBody.data.dist);
+  const M = _moonWorldPos(T, _ssV1);
+  const eR = earthBody.data.r * earthBody.mesh.scale.x;   // Earth's current world radius
+  _ssV2.copy(M).normalize();                              // Sun→Moon ray direction
+  const de = _ssV2.dot(E);
+  const disc = de * de - (E.lengthSq() - eR * eR);        // ray/sphere discriminant
+  if (disc < 0) return null;                              // shadow misses the globe
+  const tHit = de - Math.sqrt(disc);                      // near-side (day) hit, along the ray
+  // The hit must be BEHIND the Moon (farther from the Sun than the Moon): only
+  // then is the Moon between Sun and Earth and its shadow falling on the globe.
+  // At full moon the ray crosses Earth *in front of* the Moon, so the shadow
+  // falls behind the Moon, away from Earth — not a solar eclipse.
+  if (tHit <= M.length()) return null;
+  out.copy(_ssV2).multiplyScalar(tHit);
+  return out;
+}
+/* Shadow-centre (lon, lat) in the Earth mesh's LOCAL (spinning) frame at time
+   T. The dot/line are children of the spinning Earth mesh, so we rotate the
+   world-space shadow direction into the mesh's local frame (spin + 23.4° tilt,
+   both evaluated at T) and read (lon, lat) off it with the earthRotationY
+   convention (Greenwich = +X, east → −Z, up = +Y). Falls back to the sub-lunar
+   point when the shadow is off the globe, so the trail always tracks the Moon. */
+function earthShadowSpot(T) {
+  const E = keplerPosition("earth", T, earthBody._dist ?? earthBody.data.dist);
+  const dir = new THREE.Vector3();
+  const P = _shadowCenterWorld(T, _ssV2);
+  if (P) dir.copy(P).sub(E).normalize();                 // toward the shadow centre
+  else {
+    _moonWorldPos(T, _ssV3);
+    dir.copy(_ssV3).sub(E).normalize();                  // sub-lunar (Earth→Moon)
+  }
+  // World orientation of the mesh = tilt(holder, about Z) ∘ spin(mesh, about Y),
+  // both evaluated at T. To go from a WORLD direction into the mesh's LOCAL
+  // frame we apply the inverse: qInv = (qTilt·qSpin)⁻¹ = conj(qTilt)·conj(qSpin).
+  const tilt = THREE.MathUtils.degToRad(earthBody.data.tilt);
+  const spin = earthRotationY(T, E);
+  _ssQ1.setFromAxisAngle(_ssV1.set(0, 1, 0), spin);      // mesh spin  (about Y)
+  _ssQ2.setFromAxisAngle(_ssV1.set(0, 0, 1), tilt);      // holder tilt (about Z)
+  _ssQ2.multiply(_ssQ1);                                 // qWorld = qTilt · qSpin
+  _ssQ2.conjugate();                                     // qInv
+  dir.applyQuaternion(_ssQ2);
+  const r = dir.length() || 1;
+  const lonDeg = Math.atan2(-dir.z / r, dir.x / r) / DEG;
+  const latDeg = Math.asin(Math.max(-1, Math.min(1, dir.y / r))) / DEG;
+  return { lonDeg, latDeg };
+}
+/* Elongation (deg) between the Sun and the Moon as seen from Earth at time T.
+   Pure orbital geometry — SCALE-INVARIANT, so it tells us how close the Moon
+   *really* is to the Sun in the sky, independent of the artistic body sizes.
+   (The elongation angle depends only on orbital positions, not body radii.) */
+function _sunMoonElongationDeg(T) {
+  const E = keplerPosition("earth", T, earthBody._dist ?? earthBody.data.dist);
+  const M = moonRelScene(T, MOON ? MOON.dist : 2.2);
+  const eLen = Math.hypot(E.x, E.y, E.z), mLen = Math.hypot(M.x, M.y, M.z);
+  if (eLen < 1e-9 || mLen < 1e-9) return 0;
+  const cosE = -(E.x * M.x + E.y * M.y + E.z * M.z) / (eLen * mLen); // Sun dir = -E
+  return Math.acos(Math.max(-1, Math.min(1, cosE))) / DEG;
+}
+/* Realistic-eclipse threshold. The artistic-scale Moon is ~31x too big, so its
+   RENDERED shadow sweeps across Earth over a huge elongation range (~27°), making
+   nearly every new moon look like an eclipse. A REAL solar eclipse only happens
+   when the Moon is close to an eclipsing node — i.e. when its (real) disc actually
+   crosses the Sun's (real) disc in the sky. We test that with the scale-invariant
+   elongation and the REAL angular radii, so the indicator only lights up for genuine
+   eclipses (~2-5/year) instead of monthly. The rendered shadow itself is untouched —
+   it still shows what the oversized Moon physically does in this scale. */
+const REAL_MOON_ANG_R_DEG = 0.26;   // real Moon's mean angular radius (deg)
+const REAL_SUN_ANG_R_DEG  = 0.27;   // real Sun's mean angular radius (deg)
+const REAL_ECLIPSE_ELONG_DEG = REAL_MOON_ANG_R_DEG + REAL_SUN_ANG_R_DEG; // ~0.53°
+/* A (realistic) solar eclipse is in progress at T iff the Moon's real disc
+   crosses the Sun's real disc (elongation < threshold). Used to light the
+   dot/trail red — only for genuine eclipses, not the oversized-Moon shadow. */
+function solarEclipseActive(T) {
+  return _sunMoonElongationDeg(T) < REAL_ECLIPSE_ELONG_DEG;
+}
+/* Geographic (lon, lat in deg) → Earth-mesh local geometry-space point at radius rr. */
+function geoToLocal(lonDeg, latDeg, rr) {
+  const lon = lonDeg * DEG, lat = latDeg * DEG;
+  return {
+    x: rr * Math.cos(lat) * Math.cos(lon),
+    y: rr * Math.sin(lat),
+    z: -rr * Math.cos(lat) * Math.sin(lon)
+  };
+}
+/* Lazily build the shadow-trail TUBE BAND (a ribbon of real width, since WebGL
+   caps `lineWidth` at 1px) + the "now" marker, as children of the Earth mesh.
+   The band is wide enough to read on screen and follows the surface normal, so
+   it hugs the globe. Buffers are pre-allocated for the max sample count. */
+function ensureEclipsePath() {
+  if (eclipsePathTrail) return;
+  const rr = earthBody.data.r * 1.015;   // just above the surface
+  const n = ECL_TRAIL_STEPS + 1;         // sample points
+  const pos = new Float32Array(n * 2 * 3);
+  // Triangle strip indices: for each pair of consecutive samples, two triangles.
+  const idx = new Uint16Array((n - 1) * 6);
+  for (let i = 0; i < n - 1; i++) {
+    const a = i * 2, b = i * 2 + 1, c = i * 2 + 2, d = i * 2 + 3;
+    idx[i * 6] = a;   idx[i * 6 + 1] = c;   idx[i * 6 + 2] = b;
+    idx[i * 6 + 3] = b;   idx[i * 6 + 4] = c;   idx[i * 6 + 5] = d;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  const mat = new THREE.MeshBasicMaterial({ color: 0x6fd0ff, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide });
+  eclipsePathTrail = new THREE.Mesh(g, mat);
+  eclipsePathTrail.renderOrder = 5;
+  eclipsePathTrail.geometry.setDrawRange(0, 0);
+  earthBody.mesh.add(eclipsePathTrail);
+  // Glowing "now" marker (additive, small) at the current shadow spot.
+  const dotGeo = new THREE.SphereGeometry(rr * 0.06, 16, 12);
+  const dotMat = new THREE.MeshBasicMaterial({ color: 0xbfe8ff, transparent: true, opacity: 1, depthTest: false, blending: THREE.AdditiveBlending });
+  eclipsePathDot = new THREE.Mesh(dotGeo, dotMat);
+  eclipsePathDot.renderOrder = 6;
+  earthBody.mesh.add(eclipsePathDot);
+}
+function removeEclipsePath() {
+  if (eclipsePathTrail) { earthBody.mesh.remove(eclipsePathTrail); eclipsePathTrail.geometry.dispose(); eclipsePathTrail.material.dispose(); eclipsePathTrail = null; }
+  if (eclipsePathDot) { earthBody.mesh.remove(eclipsePathDot); eclipsePathDot.geometry.dispose(); eclipsePathDot.material.dispose(); eclipsePathDot = null; }
+}
+/* Per-frame: recompute the entire shadow trail from scratch (last 3 hours in
+   5-min steps, each evaluated at its own time T so it tracks the spinning
+   globe) and rebuild the tube-band ribbon. The band shows where the Moon's
+   shadow *has been*; the dot marks *now*. */
+function updateEclipsePath(T, now) {
+  if (!eclipsePathOn) return;
+  ensureEclipsePath();
+  const rr = earthBody.data.r * 1.015;
+  const spanDays = 3 / 24;   // 3-hour trail
+  const steps = ECL_TRAIL_STEPS;
+  const n = steps + 1;
+  const w = earthBody.data.r * 0.03;   // half-width of the band
+  // Sample the shadow centre at each time (oldest → newest).
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const Ti = T - spanDays + (i * spanDays / steps);
+    const s = earthShadowSpot(Ti);
+    const g = geoToLocal(s.lonDeg, s.latDeg, rr);
+    const L = Math.hypot(g.x, g.y, g.z) || 1;   // ~rr
+    pts.push({
+      x: g.x, y: g.y, z: g.z,
+      nx: g.x / L, ny: g.y / L, nz: g.z / L
+    });
+  }
+  // Build the ribbon (two verts per sample: centre ± normal×w), splitting at any
+  // gap > 90° (antimeridian wrap) so no segment jumps across the globe.
+  const posArr = eclipsePathTrail.geometry.getAttribute("position").array;
+  const idxArr = eclipsePathTrail.geometry.index.array;
+  let vi = 0, ii = 0, runStart = 0;
+  const flush = (endIdx) => {
+    for (let i = runStart; i < endIdx; i++) {
+      const p = pts[i];
+      posArr[vi++] = p.x - p.nx * w; posArr[vi++] = p.y - p.ny * w; posArr[vi++] = p.z - p.nz * w;
+      posArr[vi++] = p.x + p.nx * w; posArr[vi++] = p.y + p.ny * w; posArr[vi++] = p.z + p.nz * w;
+    }
+    for (let i = runStart; i < endIdx - 1; i++) {
+      const a = (i - runStart) * 2, b = a + 1, c = a + 2, d = a + 3;
+      idxArr[ii++] = a; idxArr[ii++] = c; idxArr[ii++] = b;
+      idxArr[ii++] = b; idxArr[ii++] = c; idxArr[ii++] = d;
+    }
+  };
+  for (let i = 0; i < n - 1; i++) {
+    const gap = pts[i].x * pts[i + 1].x + pts[i].y * pts[i + 1].y + pts[i].z * pts[i + 1].z < Math.cos(90 * DEG);
+    if (gap) { flush(i + 1); runStart = i + 1; }
+  }
+  flush(n);
+  // Now-marker at the current shadow spot.
+  const cur = earthShadowSpot(T);
+  const curP = geoToLocal(cur.lonDeg, cur.latDeg, rr);
+  eclipsePathDot.position.set(curP.x, curP.y, curP.z);
+  const ec = solarEclipseActive(T);
+  eclipsePathDot.material.color.setHex(ec ? 0xff5a3c : 0xbfe8ff);
+  eclipsePathTrail.material.color.setHex(ec ? 0xff7a5c : 0x6fd0ff);
+  // Publish.
+  const g = eclipsePathTrail.geometry;
+  g.getAttribute("position").needsUpdate = true;
+  g.index.needsUpdate = true;
+  g.setDrawRange(0, ii);
+  g.computeBoundingSphere();
+}
+function toggleEclipsePath() {
+  eclipsePathOn = !eclipsePathOn;
+  if (eclipsePathOn) {
+    ensureEclipsePath();
+    toast("Eclipse path on — the blue trail shows where the Moon's shadow has been (3 h)");
+  } else {
+    removeEclipsePath();
+  }
+  if ($("eclipsePathBtn")) {
+    $("eclipsePathBtn").classList.toggle("active", eclipsePathOn);
+    $("eclipsePathBtn").textContent = eclipsePathOn ? "🌘 Eclipse path: ON" : "🌘 Eclipse path";
+  }
+}
+function toggleSolarWind() {
+  SW.on = !SW.on;
+  SW.wind.visible = SW.on;
+  if (SW.on) {
+    // re-seed CME scheduling so it starts cleanly
+    SW.cmeNext = (T_now ? T_now : 0) + 6;   // first CME ~6 sim-days out
+    toast("Solar wind on — the corotating Parker-spiral stream + CME shock fronts");
+  } else {
+    for (const c of SW.cmes) _disposeCmeMesh(c.mesh);
+    SW.cmes.length = 0;
+  }
+  if ($("solarWindBtn")) {
+    $("solarWindBtn").classList.toggle("active", SW.on);
+    $("solarWindBtn").textContent = SW.on ? "💨 Solar wind: ON" : "💨 Solar wind";
+  }
+}
+let T_now = 0;   // current sim T (days since J2000), updated each frame
 
 /* ================= UPCOMING ECLIPSES PREDICTOR =================
     Scans the next ~2.5 years (500 days, 15-min steps) for times when the
@@ -3010,7 +3557,7 @@ function computeEclipses(fromMs, days, stepMin) {
   // node-crossing is most representative: a full moon a day or two off from a
   // node can have |β| < 1.6° while the Moon at exact opposition has |β| > 1.6°
   // (no eclipse). Checking per-step lets those near-misses slip in.
-  //   Solar: elongation < 1.6° (real solar eclipses sit at 0.26–1.46°).
+  //   Solar: elongation < 1.6° (now uses the same scene-frame disc-overlap test as the live red-dot indicator (solarEclipseActive), so it only lists GENUINE eclipses — real solar eclipses sit at 0.26–1.46°).
   //   Lunar: elongation > 171° (real lunar eclipses sit at 173–179°) AND
   //          |latitude at extremum| < 1.6° (real lunar eclipses have |β| ≤ 1.56°;
   //          near-miss full moons at a node have |β| ≥ 2.1°).
@@ -3029,16 +3576,21 @@ function computeEclipses(fromMs, days, stepMin) {
     const sunDir = { x: -E.x, y: -E.y, z: -E.z };
     const cosE = (sunDir.x * M.x + sunDir.y * M.y + sunDir.z * M.z) / (Math.hypot(sunDir.x, sunDir.y, sunDir.z) * md);
     const elong = Math.acos(Math.max(-1, Math.min(1, cosE))) / DEG;
+    // Scene-frame (rendered) Sun–Moon elongation — the SAME scale-invariant value
+    // the live red-dot indicator uses (solarEclipseActive). The ecliptic `elong`
+    // above is a looser proxy that over-flags; the scene value is the one that
+    // matches what the viewer actually sees, so the predictor and the dot agree.
+    const sEl = _sunMoonElongationDeg(T);
 
-    const inSolar = elong < 1.6;
+    const inSolar = sEl < REAL_ECLIPSE_ELONG_DEG;   // real disc-overlap (genuine eclipse)
     const inLunar = elong > 171;
 
     if (!inWindow) {
-      if (inSolar) { inWindow = true; winType = "solar"; bestElong = elong; bestT = T; bestLat = latDeg; }
+      if (inSolar) { inWindow = true; winType = "solar"; bestElong = sEl; bestT = T; bestLat = latDeg; }
       else if (inLunar) { inWindow = true; winType = "lunar"; bestElong = elong; bestT = T; bestLat = latDeg; }
     } else if (winType === "solar") {
       if (!inSolar) closeWindow(true);
-      else if (elong < bestElong) { bestElong = elong; bestT = T; bestLat = latDeg; }
+      else if (sEl < bestElong) { bestElong = sEl; bestT = T; bestLat = latDeg; }
     } else { // lunar
       if (!inLunar) closeWindow(true);
       else if (elong > bestElong) { bestElong = elong; bestT = T; bestLat = latDeg; }
@@ -3313,7 +3865,46 @@ function exitEarthView() {
 }
 function toggleEarthView() { evState.on ? exitEarthView() : enterEarthView(); }
 
+/* ---- TRUE SCALE toggle ----
+   Snaps the system to real proportions (planet sizes + orbital distances, via
+   the existing `realScale` machinery) and flies the camera out to a vantage
+   where the whole system is visible. Earth becomes a sub-pixel speck — that's
+   the point. Toggling again returns to the artistic scale and flies home. */
+function toggleTrueScale() {
+  realScale = !realScale;
+  if ($("realScale")) $("realScale").checked = realScale;
+  bodies.forEach(applyScale);
+  applyRealScaleDistances();
+  if (realScale) {
+    releaseFocus();   // stop tracking a focused body so the camera stays on the system
+    // Fly out far enough to see the outer planets.
+    const maxAU = 30; // just past Neptune
+    let d = maxAU * AU * 1.7;
+    if (camera.far && camera.far < d * 1.25) { // keep inside the far plane
+      d = Math.max(220, camera.far * 0.72);
+      camera.far = d * 1.3;
+      camera.updateProjectionMatrix();
+    }
+    const target = new THREE.Vector3(0, 0, 0);
+    const dir = camera.position.clone().sub(controls.target);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 0.4, 1);
+    dir.normalize();
+    const pos = target.clone().add(dir.multiplyScalar(d)).add(new THREE.Vector3(0, d * 0.28, 0));
+    camAnim = { from: camera.position.clone(), to: pos, targetFrom: controls.target.clone(), targetTo: target, t: 0 };
+    toast("True scale on — Earth is now a sub-pixel speck ~40 light-seconds from the Sun");
+  } else {
+    resetView();
+  }
+  if ($("trueScaleBtn")) {
+    $("trueScaleBtn").classList.toggle("active", realScale);
+    $("trueScaleBtn").textContent = realScale ? "🔭 True scale: ON" : "🔭 True scale";
+  }
+}
+
 document.getElementById("earthViewBtn").onclick = toggleEarthView;
+document.getElementById("eclipsePathBtn").onclick = toggleEclipsePath;
+document.getElementById("trueScaleBtn").onclick = toggleTrueScale;
+document.getElementById("solarWindBtn").onclick = toggleSolarWind;
 document.getElementById("evExit").onclick = exitEarthView;
 // Drag to look, scroll to zoom
 let evDrag = null;
@@ -3364,6 +3955,29 @@ animate();
 /* debug hooks (harmless) */
 window.__ss = {
   renderer, scene, camera, controls,
+  // Diagnostic: Moon + Earth world positions (and a T-based shadow-centre probe)
+  moonProbe: () => {
+    const ep = new THREE.Vector3(); earthBody.mesh.getWorldPosition(ep);
+    let mp = null;
+    earthBody.holder.traverse((o) => { if (o.userData && o.userData.moonKey === "moon" && !mp) mp = new THREE.Vector3(); if (o.userData && o.userData.moonKey === "moon" && mp) o.getWorldPosition(mp); });
+    // T-based mirror of _moonWorldPos (what the eclipse-path code uses)
+    const T = (simMs - J2000_MS) / 86400000;
+    const tilt = THREE.MathUtils.degToRad(earthBody.data.tilt);
+    const ct = Math.cos(tilt), st = Math.sin(tilt);
+    const E = keplerPosition("earth", T, earthBody._dist ?? earthBody.data.dist);
+    const M = moonRelScene(T, MOON ? MOON.dist : 2.2);
+    const myMoon = new THREE.Vector3(E.x + ct * M.x + st * M.y, E.y - st * M.x + ct * M.y, E.z + M.z);
+    return {
+      T: +T.toFixed(6),
+      actualMoon: mp ? mp.toArray().map(v => +v.toFixed(4)) : null,
+      myMoon: myMoon.toArray().map(v => +v.toFixed(4)),
+      earth: ep.toArray().map(v => +v.toFixed(4)),
+      keplerEarth: E.toArray().map(v => +v.toFixed(4)),
+      moonRelScene: M,
+      moonDistData: MOON ? MOON.dist : 2.2,
+      earthDist: earthBody._dist ?? earthBody.data.dist,
+    };
+  },
   ring: (bodies.find(b => b.data && b.data.ring) || {}).ringMesh || null,
   saturn: bodies.find(b => b.data && b.data.ring) || null,
   home: HOME_POS,
@@ -3408,6 +4022,11 @@ window.__ss = {
   meanLonDeg: (T_ms) => { const T=(T_ms-J2000_MS)/86400000; return 218.3164477 + 481267.88123421*(T/36525); },
   trueLonDeg: (T_ms) => { const T=(T_ms-J2000_MS)/86400000; return moonTrueLongitudeDeg(T); },
   keplerPosition, ORB_EL,
+  SW,
+  bodies,
+  updateCmes,
+  updateWind,
+  get T_now() { return T_now; },
 };
 </script>
 </body>
